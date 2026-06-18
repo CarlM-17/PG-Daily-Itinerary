@@ -216,6 +216,42 @@ function formatItineraryDate(inputDate) {
   }).format(new Date(year, month - 1, day));
 }
 
+function normalizeDateKey(value) {
+  const text = String(value || "").trim();
+
+  if (!text) return "";
+
+  const isoMatch = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (isoMatch) {
+    return [
+      isoMatch[1],
+      isoMatch[2].padStart(2, "0"),
+      isoMatch[3].padStart(2, "0"),
+    ].join("-");
+  }
+
+  const slashMatch = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (slashMatch) {
+    return [
+      slashMatch[3],
+      slashMatch[1].padStart(2, "0"),
+      slashMatch[2].padStart(2, "0"),
+    ].join("-");
+  }
+
+  const parsed = new Date(text);
+
+  if (!Number.isNaN(parsed.getTime())) {
+    return [
+      parsed.getFullYear(),
+      String(parsed.getMonth() + 1).padStart(2, "0"),
+      String(parsed.getDate()).padStart(2, "0"),
+    ].join("-");
+  }
+
+  return text.toLowerCase();
+}
+
 async function readStores() {
   try {
     return await readStoresWithSheetsApi();
@@ -333,16 +369,21 @@ async function appendVisit({ date, store, timeIn, timeOut, note }) {
 async function updateItinerarySheet(sheets, date, store) {
   const sheetInfo = await resolveSheetInfo(sheets, ITINERARY_SHEET_NAME);
   const itineraryDate = formatItineraryDate(date);
+  const itineraryDateKey = normalizeDateKey(date);
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
     range: `${quoteSheetName(sheetInfo.title)}!A:I`,
   });
   const rows = response.data.values || [];
-  const targetRowIndex = rows.findIndex(
-    (row, index) => index > 0 && String(row[0] || "").trim() === itineraryDate
-  );
+  const matchingRowIndexes = rows
+    .map((row, index) => ({ row, index }))
+    .filter(
+      ({ row, index }) =>
+        index > 0 && normalizeDateKey(row[0]) === itineraryDateKey
+    )
+    .map(({ index }) => index);
 
-  if (targetRowIndex === -1) {
+  if (!matchingRowIndexes.length) {
     await sheets.spreadsheets.values.append({
       spreadsheetId: SPREADSHEET_ID,
       range: `${quoteSheetName(sheetInfo.title)}!A1:I1`,
@@ -356,17 +397,26 @@ async function updateItinerarySheet(sheets, date, store) {
     return;
   }
 
-  const row = rows[targetRowIndex] || [];
-  const existingStores = row.slice(1, 9).map((value) => String(value || "").trim());
+  const targetRowIndex = matchingRowIndexes[0];
+  const existingStores = [];
 
-  if (existingStores.includes(store)) {
-    await applyItinerarySheetFormatting(sheets, sheetInfo.sheetId);
-    return;
+  for (const rowIndex of matchingRowIndexes) {
+    const row = rows[rowIndex] || [];
+
+    for (const value of row.slice(1, 9)) {
+      const storeName = String(value || "").trim();
+
+      if (storeName && !existingStores.includes(storeName)) {
+        existingStores.push(storeName);
+      }
+    }
   }
 
-  const emptyStoreIndex = existingStores.findIndex((value) => !value);
+  if (!existingStores.includes(store)) {
+    existingStores.push(store);
+  }
 
-  if (emptyStoreIndex === -1) {
+  if (existingStores.length > 8) {
     const error = new Error(
       `Itinerary already has 8 stores for ${itineraryDate}.`
     );
@@ -375,16 +425,28 @@ async function updateItinerarySheet(sheets, date, store) {
   }
 
   const rowNumber = targetRowIndex + 1;
-  const columnLetter = String.fromCharCode("B".charCodeAt(0) + emptyStoreIndex);
+  const rowValues = [itineraryDate, ...existingStores];
+
+  while (rowValues.length < 9) {
+    rowValues.push("");
+  }
 
   await sheets.spreadsheets.values.update({
     spreadsheetId: SPREADSHEET_ID,
-    range: `${quoteSheetName(sheetInfo.title)}!${columnLetter}${rowNumber}`,
+    range: `${quoteSheetName(sheetInfo.title)}!A${rowNumber}:I${rowNumber}`,
     valueInputOption: "USER_ENTERED",
     requestBody: {
-      values: [[store]],
+      values: [rowValues],
     },
   });
+
+  for (const duplicateRowIndex of matchingRowIndexes.slice(1)) {
+    const duplicateRowNumber = duplicateRowIndex + 1;
+    await sheets.spreadsheets.values.clear({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${quoteSheetName(sheetInfo.title)}!A${duplicateRowNumber}:I${duplicateRowNumber}`,
+    });
+  }
 
   await applyItinerarySheetFormatting(sheets, sheetInfo.sheetId);
 }
