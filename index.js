@@ -1286,6 +1286,30 @@ app.get("/", (req, res) => {
       box-shadow: inset 0 0 0 2px #1a73e8;
     }
 
+    .table-input,
+    .table-select {
+      width: 100%;
+      min-height: 24px;
+      border: 0;
+      border-radius: 0;
+      background: #ffffff;
+      color: #000000;
+      font: inherit;
+      padding: 0;
+      outline: none;
+    }
+
+    .table-input:focus,
+    .table-select:focus {
+      box-shadow: inset 0 0 0 2px #1a73e8;
+    }
+
+    .duration-cell {
+      display: block;
+      min-height: 24px;
+      line-height: 24px;
+    }
+
     @media (max-width: 760px) {
       main {
         width: min(100% - 20px, 960px);
@@ -1294,8 +1318,7 @@ app.get("/", (req, res) => {
 
       .topbar,
       .actions,
-      .table-toolbar,
-      .table-actions {
+      .table-toolbar {
         align-items: stretch;
         flex-direction: column;
       }
@@ -1381,10 +1404,7 @@ app.get("/", (req, res) => {
     <section class="panel table-panel">
       <div class="table-toolbar">
         <h2>Daily Sheet</h2>
-        <div class="table-actions">
-          <button id="addRowButton" type="button">Add Row</button>
-          <button id="saveTableButton" type="button">Save Table Changes</button>
-        </div>
+        <div class="status" id="tableStatus" role="status" aria-live="polite"></div>
       </div>
       <div class="table-wrap">
         <table id="dailyTable" aria-label="Daily Sheet editable table">
@@ -1415,11 +1435,12 @@ app.get("/", (req, res) => {
     const noteInput = document.getElementById("note");
     const durationOutput = document.getElementById("duration");
     const statusOutput = document.getElementById("status");
+    const tableStatusOutput = document.getElementById("tableStatus");
     const dailyTableBody = document.getElementById("dailyTableBody");
-    const addRowButton = document.getElementById("addRowButton");
-    const saveTableButton = document.getElementById("saveTableButton");
     let currentEntry = null;
     let dailyRows = [];
+    let storeOptions = [];
+    let tableSaveTimer = null;
 
     function localDateValue() {
       const now = new Date();
@@ -1439,6 +1460,11 @@ app.get("/", (req, res) => {
     function setStatus(message, type = "") {
       statusOutput.textContent = message;
       statusOutput.className = "status" + (type ? " " + type : "");
+    }
+
+    function setTableStatus(message, type = "") {
+      tableStatusOutput.textContent = message;
+      tableStatusOutput.className = "status" + (type ? " " + type : "");
     }
 
     function durationBetween(timeIn, timeOut) {
@@ -1484,44 +1510,123 @@ app.get("/", (req, res) => {
 
       dailyTableBody.innerHTML = "";
 
-      rows.forEach((row) => {
+      rows.forEach((row, rowIndex) => {
+        const isPending = Boolean(currentEntry && row === currentEntry);
         const tr = document.createElement("tr");
-        const values = [
-          row.date || "",
-          row.store || "",
-          row.timeIn || "",
-          row.timeOut || "",
-          row.duration || durationBetween(row.timeIn, row.timeOut),
-          row.note || ""
-        ];
+        const editableIndex = isPending ? -1 : rowIndex;
+        const dateCell = document.createElement("td");
+        const dateControl = document.createElement("input");
+        dateControl.className = "table-input";
+        dateControl.type = "date";
+        dateControl.value = row.date || "";
+        dateControl.disabled = isPending;
+        dateControl.dataset.rowIndex = editableIndex;
+        dateControl.dataset.field = "date";
+        dateCell.appendChild(dateControl);
+        tr.appendChild(dateCell);
 
-        values.forEach((value, cellIndex) => {
-          const td = document.createElement("td");
-          td.textContent = value;
-          td.contentEditable = currentEntry && row === currentEntry ? "false" : "true";
-          td.dataset.field = ["date", "store", "timeIn", "timeOut", "duration", "note"][cellIndex];
-          tr.appendChild(td);
-        });
+        const storeCell = document.createElement("td");
+        const storeControl = document.createElement("select");
+        storeControl.className = "table-select";
+        storeControl.disabled = isPending;
+        storeControl.dataset.rowIndex = editableIndex;
+        storeControl.dataset.field = "store";
+        appendStoreOptions(storeControl, row.store || "");
+        storeCell.appendChild(storeControl);
+        tr.appendChild(storeCell);
+
+        for (const field of ["timeIn", "timeOut"]) {
+          const timeCell = document.createElement("td");
+          const timeControl = document.createElement("input");
+          timeControl.className = "table-input";
+          timeControl.type = "time";
+          timeControl.value = row[field] || "";
+          timeControl.disabled = isPending;
+          timeControl.dataset.rowIndex = editableIndex;
+          timeControl.dataset.field = field;
+          timeCell.appendChild(timeControl);
+          tr.appendChild(timeCell);
+        }
+
+        const durationCell = document.createElement("td");
+        const durationText = document.createElement("span");
+        durationText.className = "duration-cell";
+        durationText.textContent = durationBetween(row.timeIn, row.timeOut);
+        durationCell.appendChild(durationText);
+        tr.appendChild(durationCell);
+
+        const noteCell = document.createElement("td");
+        const noteControl = document.createElement("input");
+        noteControl.className = "table-input";
+        noteControl.type = "text";
+        noteControl.value = row.note || "";
+        noteControl.disabled = isPending;
+        noteControl.dataset.rowIndex = editableIndex;
+        noteControl.dataset.field = "note";
+        noteCell.appendChild(noteControl);
+        tr.appendChild(noteCell);
 
         dailyTableBody.appendChild(tr);
       });
     }
 
+    function appendStoreOptions(select, selectedStore) {
+      const blankOption = document.createElement("option");
+      blankOption.value = "";
+      blankOption.textContent = "Select store";
+      select.appendChild(blankOption);
+
+      const options = storeOptions.slice();
+
+      if (selectedStore && !options.includes(selectedStore)) {
+        options.push(selectedStore);
+      }
+
+      for (const store of options) {
+        const option = document.createElement("option");
+        option.value = store;
+        option.textContent = store;
+        option.selected = store === selectedStore;
+        select.appendChild(option);
+      }
+    }
+
     function getEditedTableRows() {
-      return Array.from(dailyTableBody.querySelectorAll("tr"))
-        .filter((tr) => tr.children.length === 6)
-        .map((tr) => {
-          const cells = Array.from(tr.children).map((cell) => cell.textContent.trim());
-          return {
-            date: cells[0],
-            store: cells[1],
-            timeIn: cells[2],
-            timeOut: cells[3],
-            duration: durationBetween(cells[2], cells[3]) || cells[4],
-            note: cells[5]
-          };
-        })
+      return dailyRows
+        .map((row) => ({
+          date: row.date || "",
+          store: row.store || "",
+          timeIn: row.timeIn || "",
+          timeOut: row.timeOut || "",
+          duration: durationBetween(row.timeIn, row.timeOut),
+          note: row.note || ""
+        }))
         .filter((row) => row.date || row.store || row.timeIn || row.timeOut || row.note);
+    }
+
+    function queueTableAutoSave() {
+      clearTimeout(tableSaveTimer);
+      setTableStatus("Auto-saving...");
+      tableSaveTimer = setTimeout(saveTableChanges, 700);
+    }
+
+    async function saveTableChanges() {
+      try {
+        const response = await fetch("/api/daily", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ rows: getEditedTableRows() })
+        });
+        const data = await response.json();
+
+        if (!response.ok) throw new Error(data.message || "Unable to save table changes.");
+
+        dailyRows = data.rows || [];
+        setTableStatus("Auto-saved.", "success");
+        renderDailyTable();
+      } catch (error) {
+        setTableStatus(error.message, "error");
+      }
     }
 
     async function loadDailyRows() {
@@ -1552,12 +1657,16 @@ app.get("/", (req, res) => {
           return;
         }
 
+        storeOptions = data.stores;
+
         for (const store of data.stores) {
           const option = document.createElement("option");
           option.value = store;
           option.textContent = store;
           storeInput.appendChild(option);
         }
+
+        renderDailyTable();
       } catch (error) {
         storeInput.innerHTML = '<option value="">Store list unavailable</option>';
         setStatus(error.message, "error");
@@ -1640,41 +1749,48 @@ app.get("/", (req, res) => {
       }
     });
 
-    addRowButton.addEventListener("click", () => {
-      dailyRows.push({
-        date: dateInput.value || localDateValue(),
-        store: "",
-        timeIn: "",
-        timeOut: "",
-        duration: "",
-        note: ""
-      });
-      renderDailyTable();
-      setStatus("New editable row added. Save table changes when ready.");
+    dailyTableBody.addEventListener("input", (event) => {
+      const control = event.target.closest("[data-row-index]");
+      if (!control) return;
+
+      const rowIndex = Number(control.dataset.rowIndex);
+      const field = control.dataset.field;
+
+      if (rowIndex < 0 || !dailyRows[rowIndex] || !field) return;
+
+      dailyRows[rowIndex][field] = control.value;
+
+      if (field === "timeIn" || field === "timeOut") {
+        dailyRows[rowIndex].duration = durationBetween(
+          dailyRows[rowIndex].timeIn,
+          dailyRows[rowIndex].timeOut
+        );
+        renderDailyTable();
+      }
+
+      queueTableAutoSave();
     });
 
-    saveTableButton.addEventListener("click", async () => {
-      saveTableButton.disabled = true;
-      setStatus("Saving table changes...");
+    dailyTableBody.addEventListener("change", (event) => {
+      const control = event.target.closest("[data-row-index]");
+      if (!control) return;
 
-      try {
-        const response = await fetch("/api/daily", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ rows: getEditedTableRows() })
-        });
-        const data = await response.json();
+      const rowIndex = Number(control.dataset.rowIndex);
+      const field = control.dataset.field;
 
-        if (!response.ok) throw new Error(data.message || "Unable to save table changes.");
+      if (rowIndex < 0 || !dailyRows[rowIndex] || !field) return;
 
-        dailyRows = data.rows || [];
-        setStatus("Table changes saved to Daily Sheet.", "success");
+      dailyRows[rowIndex][field] = control.value;
+
+      if (field === "timeIn" || field === "timeOut") {
+        dailyRows[rowIndex].duration = durationBetween(
+          dailyRows[rowIndex].timeIn,
+          dailyRows[rowIndex].timeOut
+        );
         renderDailyTable();
-      } catch (error) {
-        setStatus(error.message, "error");
-      } finally {
-        saveTableButton.disabled = false;
       }
+
+      queueTableAutoSave();
     });
 
     setAutomaticDate();
