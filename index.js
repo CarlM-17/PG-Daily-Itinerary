@@ -559,6 +559,38 @@ async function readStoreListRows(sheets) {
 
 async function rebuildItinerarySummarySheet(sheets, dailyRows) {
   const sheetInfo = await ensureSheetInfo(sheets, ITINERARY_SUMMARY_SHEET_NAME);
+  const summary = await buildItinerarySummaryData(sheets, dailyRows);
+  const storeRows = summary.stores;
+  const values = [
+    ["Itinerary Summary", "", "", "", "", "", "", "", "", "", ""],
+    ["Month", summary.monthLabel, "", "", "", "", "", "", "", "", ""],
+    ["", "", "", "", "", "", "", "", "", "", ""],
+    ["Metric", "Count", "", "Store", "Status", "Visit Count", "Last Visit", "", "Chart Data", "Count", ""],
+    summaryMonitorRow("Visited", summary.visitedCount, storeRows[0], "Visited", summary.visitedCount),
+    summaryMonitorRow("Not Visited", summary.notVisitedCount, storeRows[1], "Not Visited", summary.notVisitedCount),
+    summaryMonitorRow("Total Stores", summary.totalStores, storeRows[2], "", ""),
+  ];
+
+  for (let index = 3; index < storeRows.length; index += 1) {
+    values.push(summaryMonitorRow("", "", storeRows[index], "", ""));
+  }
+
+  await sheets.spreadsheets.values.clear({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${quoteSheetName(sheetInfo.title)}!A:K`,
+  });
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${quoteSheetName(sheetInfo.title)}!A1:K${values.length}`,
+    valueInputOption: "USER_ENTERED",
+    requestBody: { values },
+  });
+
+  await applyItinerarySummaryFormatting(sheets, sheetInfo.sheetId, values.length);
+}
+
+async function buildItinerarySummaryData(sheets, dailyRows) {
   const requiredStores = await readStoreListRows(sheets);
   const targetMonthKey = currentMonthKey();
   const monthLabel = formatMonthLabel(targetMonthKey);
@@ -578,43 +610,34 @@ async function rebuildItinerarySummarySheet(sheets, dailyRows) {
   const storeNames = requiredStores.length
     ? requiredStores
     : Array.from(new Set(dailyRows.map((row) => String(row[1] || "").trim()).filter(Boolean)));
-  const visitedCount = storeNames.filter((store) => visitCounts.has(store)).length;
-  const notVisitedCount = Math.max(storeNames.length - visitedCount, 0);
-  const values = [
-    ["Itinerary Summary", "", "", "", "", "", "", "", "", "", ""],
-    ["Month", monthLabel, "", "", "", "", "", "", "", "", ""],
-    ["", "", "", "", "", "", "", "", "", "", ""],
-    ["Metric", "Count", "", "Store", "Status", "Visit Count", "Last Visit", "", "Chart Data", "Count", ""],
-    summaryMonitorRow("Visited", visitedCount, storeNames[0], visitCounts, lastVisitDates, "Visited", visitedCount),
-    summaryMonitorRow("Not Visited", notVisitedCount, storeNames[1], visitCounts, lastVisitDates, "Not Visited", notVisitedCount),
-    summaryMonitorRow("Total Stores", storeNames.length, storeNames[2], visitCounts, lastVisitDates, "", ""),
-  ];
+  const stores = storeNames.map((store) => {
+    const count = visitCounts.get(store) || 0;
 
-  for (let index = 3; index < storeNames.length; index += 1) {
-    values.push(summaryMonitorRow("", "", storeNames[index], visitCounts, lastVisitDates, "", ""));
-  }
-
-  await sheets.spreadsheets.values.clear({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${quoteSheetName(sheetInfo.title)}!A:K`,
+    return {
+      store,
+      status: count > 0 ? "Visited" : "Not Visited",
+      visitCount: count,
+      lastVisit: lastVisitDates.get(store) || "",
+    };
   });
+  const visitedCount = stores.filter((store) => store.visitCount > 0).length;
+  const notVisitedCount = Math.max(stores.length - visitedCount, 0);
 
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${quoteSheetName(sheetInfo.title)}!A1:K${values.length}`,
-    valueInputOption: "USER_ENTERED",
-    requestBody: { values },
-  });
-
-  await applyItinerarySummaryFormatting(sheets, sheetInfo.sheetId, values.length);
+  return {
+    monthLabel,
+    visitedCount,
+    notVisitedCount,
+    totalStores: stores.length,
+    stores,
+  };
 }
 
-function summaryMonitorRow(metric, count, store, visitCounts, lastVisitDates, chartLabel, chartCount) {
+function summaryMonitorRow(metric, count, storeRow, chartLabel, chartCount) {
   return [
     metric,
     count,
     "",
-    ...summaryStoreRow(store, visitCounts, lastVisitDates),
+    ...summaryStoreRow(storeRow),
     "",
     chartLabel,
     chartCount,
@@ -622,16 +645,14 @@ function summaryMonitorRow(metric, count, store, visitCounts, lastVisitDates, ch
   ];
 }
 
-function summaryStoreRow(store, visitCounts, lastVisitDates) {
-  if (!store) return ["", "", "", ""];
-
-  const count = visitCounts.get(store) || 0;
+function summaryStoreRow(storeRow) {
+  if (!storeRow) return ["", "", "", ""];
 
   return [
-    store,
-    count > 0 ? "Visited" : "Not Visited",
-    count,
-    lastVisitDates.get(store) || "",
+    storeRow.store,
+    storeRow.status,
+    storeRow.visitCount,
+    storeRow.lastVisit,
   ];
 }
 
@@ -1233,6 +1254,35 @@ app.put("/api/daily", async (req, res) => {
   }
 });
 
+app.post("/api/summary/rebuild", async (req, res) => {
+  try {
+    const sheets = getSheetsClient();
+    await rebuildItinerarySummaryFromSheets(sheets);
+    res.json({ message: "Itinerary Summary refreshed." });
+  } catch (error) {
+    const message = formatApiError(error);
+    res.status(error.status || 500).json({ message });
+  }
+});
+
+app.get("/api/summary", async (req, res) => {
+  try {
+    const sheets = getSheetsClient();
+    const dailySheetInfo = await resolveSheetInfo(sheets, DAILY_SHEET_NAME);
+    const response = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${quoteSheetName(dailySheetInfo.title)}!A2:F`,
+    });
+    const rows = normalizeDailyRows(response.data.values || []);
+    const summary = await buildItinerarySummaryData(sheets, rows);
+
+    res.json({ summary });
+  } catch (error) {
+    const message = formatApiError(error);
+    res.status(error.status || 500).json({ message });
+  }
+});
+
 app.post("/api/visits", async (req, res) => {
   try {
     const saved = await appendVisit({
@@ -1530,6 +1580,30 @@ app.get("/", (req, res) => {
       overflow: hidden;
     }
 
+    .tabs {
+      display: flex;
+      gap: 8px;
+      margin-top: 18px;
+    }
+
+    .tab-button {
+      width: auto;
+      min-height: 42px;
+      background: #ffffff;
+      color: var(--accent-dark);
+      border: 1px solid var(--line);
+    }
+
+    .tab-button.active {
+      background: var(--accent);
+      color: #ffffff;
+      border-color: var(--accent);
+    }
+
+    .tab-panel[hidden] {
+      display: none;
+    }
+
     .table-toolbar {
       display: flex;
       justify-content: space-between;
@@ -1608,6 +1682,93 @@ app.get("/", (req, res) => {
       display: block;
       min-height: 24px;
       line-height: 24px;
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      padding: 16px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: #ffffff;
+    }
+
+    .metric span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+
+    .metric strong {
+      display: block;
+      margin-top: 4px;
+      font-size: 28px;
+      line-height: 1;
+    }
+
+    .chart-box {
+      padding: 16px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .chart-bar {
+      display: flex;
+      height: 34px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #f8d7da;
+    }
+
+    .chart-visited {
+      width: var(--visited-width, 0%);
+      background: #176122;
+    }
+
+    .chart-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 10px;
+      font-size: 13px;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .legend-dot {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      margin-right: 5px;
+      border-radius: 50%;
+      background: #176122;
+    }
+
+    .legend-dot.missing {
+      background: #b42318;
+    }
+
+    .status-pill {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 12px;
+      font-weight: 800;
+      background: #f8d7da;
+      color: #8a1f17;
+    }
+
+    .status-pill.visited {
+      background: #d1fadf;
+      color: #05603a;
     }
 
     @media (max-width: 760px) {
@@ -1814,7 +1975,12 @@ app.get("/", (req, res) => {
       </aside>
     </section>
 
-    <section class="panel table-panel">
+    <div class="tabs" role="tablist" aria-label="Workbook views">
+      <button id="dailyTabButton" class="tab-button active" type="button" role="tab" aria-selected="true" aria-controls="dailyTabPanel">Daily Sheet</button>
+      <button id="summaryTabButton" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="summaryTabPanel">Itinerary Summary</button>
+    </div>
+
+    <section id="dailyTabPanel" class="panel table-panel tab-panel" role="tabpanel">
       <div class="table-toolbar">
         <h2>Daily Sheet</h2>
         <div class="status" id="tableStatus" role="status" aria-live="polite"></div>
@@ -1837,6 +2003,43 @@ app.get("/", (req, res) => {
         </table>
       </div>
     </section>
+
+    <section id="summaryTabPanel" class="panel table-panel tab-panel" role="tabpanel" hidden>
+      <div class="table-toolbar">
+        <h2>Itinerary Summary</h2>
+        <div class="status" id="summaryStatus" role="status" aria-live="polite"></div>
+      </div>
+      <div class="summary-grid">
+        <div class="metric"><span>Month</span><strong id="summaryMonth">-</strong></div>
+        <div class="metric"><span>Visited</span><strong id="summaryVisited">0</strong></div>
+        <div class="metric"><span>Not Visited</span><strong id="summaryNotVisited">0</strong></div>
+      </div>
+      <div class="chart-box">
+        <div id="summaryChartBar" class="chart-bar" style="--visited-width: 0%">
+          <div class="chart-visited"></div>
+          <div></div>
+        </div>
+        <div class="chart-legend">
+          <span><span class="legend-dot"></span>Visited</span>
+          <span><span class="legend-dot missing"></span>Not Visited</span>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table aria-label="Itinerary Summary table">
+          <thead>
+            <tr>
+              <th>Store</th>
+              <th>Status</th>
+              <th>Visit Count</th>
+              <th>Last Visit</th>
+            </tr>
+          </thead>
+          <tbody id="summaryTableBody">
+            <tr><td colspan="4">Loading Itinerary Summary...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
   </main>
 
   <script>
@@ -1849,7 +2052,13 @@ app.get("/", (req, res) => {
     const durationOutput = document.getElementById("duration");
     const statusOutput = document.getElementById("status");
     const tableStatusOutput = document.getElementById("tableStatus");
+    const summaryStatusOutput = document.getElementById("summaryStatus");
     const dailyTableBody = document.getElementById("dailyTableBody");
+    const summaryTableBody = document.getElementById("summaryTableBody");
+    const dailyTabButton = document.getElementById("dailyTabButton");
+    const summaryTabButton = document.getElementById("summaryTabButton");
+    const dailyTabPanel = document.getElementById("dailyTabPanel");
+    const summaryTabPanel = document.getElementById("summaryTabPanel");
     let currentEntry = null;
     let dailyRows = [];
     let storeOptions = [];
@@ -1878,6 +2087,11 @@ app.get("/", (req, res) => {
     function setTableStatus(message, type = "") {
       tableStatusOutput.textContent = message;
       tableStatusOutput.className = "status" + (type ? " " + type : "");
+    }
+
+    function setSummaryStatus(message, type = "") {
+      summaryStatusOutput.textContent = message;
+      summaryStatusOutput.className = "status" + (type ? " " + type : "");
     }
 
     function durationBetween(timeIn, timeOut) {
@@ -2037,6 +2251,7 @@ app.get("/", (req, res) => {
         dailyRows = data.rows || [];
         setTableStatus("Auto-saved.", "success");
         renderDailyTable();
+        await loadSummary();
       } catch (error) {
         setTableStatus(error.message, "error");
       }
@@ -2053,6 +2268,89 @@ app.get("/", (req, res) => {
         renderDailyTable();
       } catch (error) {
         dailyTableBody.innerHTML = '<tr><td colspan="6">' + error.message + '</td></tr>';
+      }
+    }
+
+    async function refreshItinerarySummary() {
+      try {
+        const response = await fetch("/api/summary/rebuild", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" }
+        });
+        const data = await response.json();
+
+        if (!response.ok) throw new Error(data.message || "Unable to refresh Itinerary Summary.");
+
+        setTableStatus("Itinerary Summary refreshed.", "success");
+        await loadSummary();
+      } catch (error) {
+        setTableStatus(error.message, "error");
+        setSummaryStatus(error.message, "error");
+      }
+    }
+
+    async function loadSummary() {
+      try {
+        const response = await fetch("/api/summary");
+        const data = await response.json();
+
+        if (!response.ok) throw new Error(data.message || "Unable to load Itinerary Summary.");
+
+        renderSummary(data.summary);
+        setSummaryStatus("Updated.", "success");
+      } catch (error) {
+        setSummaryStatus(error.message, "error");
+        summaryTableBody.innerHTML = '<tr><td colspan="4">' + error.message + '</td></tr>';
+      }
+    }
+
+    function renderSummary(summary) {
+      const total = summary.totalStores || 0;
+      const visited = summary.visitedCount || 0;
+      const visitedWidth = total ? Math.round((visited / total) * 100) : 0;
+      document.getElementById("summaryMonth").textContent = summary.monthLabel || "-";
+      document.getElementById("summaryVisited").textContent = String(visited);
+      document.getElementById("summaryNotVisited").textContent = String(summary.notVisitedCount || 0);
+      document.getElementById("summaryChartBar").style.setProperty("--visited-width", visitedWidth + "%");
+      summaryTableBody.innerHTML = "";
+
+      if (!summary.stores || !summary.stores.length) {
+        summaryTableBody.innerHTML = '<tr><td colspan="4">No stores found in StoreList.</td></tr>';
+        return;
+      }
+
+      for (const store of summary.stores) {
+        const tr = document.createElement("tr");
+        const statusClass = store.status === "Visited" ? "visited" : "";
+        tr.innerHTML =
+          "<td>" + escapeForHtml(store.store) + "</td>" +
+          '<td><span class="status-pill ' + statusClass + '">' + escapeForHtml(store.status) + "</span></td>" +
+          "<td>" + escapeForHtml(store.visitCount) + "</td>" +
+          "<td>" + escapeForHtml(store.lastVisit || "-") + "</td>";
+        summaryTableBody.appendChild(tr);
+      }
+    }
+
+    function escapeForHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function setActiveTab(tabName) {
+      const showSummary = tabName === "summary";
+      dailyTabButton.classList.toggle("active", !showSummary);
+      summaryTabButton.classList.toggle("active", showSummary);
+      dailyTabButton.setAttribute("aria-selected", String(!showSummary));
+      summaryTabButton.setAttribute("aria-selected", String(showSummary));
+      dailyTabPanel.hidden = showSummary;
+      summaryTabPanel.hidden = !showSummary;
+
+      if (showSummary) {
+        loadSummary();
       }
     }
 
@@ -2153,6 +2451,7 @@ app.get("/", (req, res) => {
         setAutomaticDate();
         noteInput.value = "";
         await loadDailyRows();
+        await loadSummary();
         refreshPreview();
       } catch (error) {
         setStatus(error.message, "error");
@@ -2206,10 +2505,14 @@ app.get("/", (req, res) => {
       queueTableAutoSave();
     });
 
+    dailyTabButton.addEventListener("click", () => setActiveTab("daily"));
+    summaryTabButton.addEventListener("click", () => setActiveTab("summary"));
+
     setAutomaticDate();
     setPunchState(false);
     loadStores();
-    loadDailyRows();
+    loadDailyRows().then(refreshItinerarySummary);
+    loadSummary();
     refreshPreview();
   </script>
 </body>
