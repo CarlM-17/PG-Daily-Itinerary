@@ -7,6 +7,7 @@ const SPREADSHEET_ID =
   process.env.SPREADSHEET_ID || "13hgFrJPHbzrfXb2-tMHJ5lZbtQhSVvyJwRwYaTi9aII";
 const DAILY_SHEET_NAME = process.env.DAILY_SHEET_NAME || "Daily Sheet";
 const ITINERARY_SHEET_NAME = process.env.ITINERARY_SHEET_NAME || "Itinerary";
+const TIMESHEET_SHEET_NAME = process.env.TIMESHEET_SHEET_NAME || "TimeSheet";
 const STORE_SHEET_NAME = process.env.STORE_SHEET_NAME || "Store";
 
 app.use(express.json());
@@ -202,6 +203,55 @@ function calculateDuration(timeIn, timeOut) {
   return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
 }
 
+function parseTimeToMinutes(value) {
+  const text = String(value || "").trim();
+
+  if (!text) return null;
+
+  const amPmMatch = text.match(/^(\d{1,2}):(\d{2})(?::\d{2})?\s*(AM|PM)$/i);
+
+  if (amPmMatch) {
+    let hours = Number(amPmMatch[1]);
+    const minutes = Number(amPmMatch[2]);
+    const period = amPmMatch[3].toUpperCase();
+
+    if (period === "PM" && hours < 12) hours += 12;
+    if (period === "AM" && hours === 12) hours = 0;
+
+    return hours * 60 + minutes;
+  }
+
+  const hourMinuteMatch = text.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+
+  if (hourMinuteMatch) {
+    return Number(hourMinuteMatch[1]) * 60 + Number(hourMinuteMatch[2]);
+  }
+
+  return null;
+}
+
+function minutesToClock(totalMinutes) {
+  const normalized = ((totalMinutes % 1440) + 1440) % 1440;
+  const hours = Math.floor(normalized / 60);
+  const minutes = normalized % 60;
+
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
+function minutesToDuration(startMinutes, endMinutes) {
+  let adjustedEnd = endMinutes;
+
+  if (adjustedEnd < startMinutes) {
+    adjustedEnd += 24 * 60;
+  }
+
+  const totalMinutes = adjustedEnd - startMinutes;
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
 function formatItineraryDate(inputDate) {
   const [year, month, day] = String(inputDate || "").split("-").map(Number);
 
@@ -362,8 +412,128 @@ async function appendVisit({ date, store, timeIn, timeOut, note }) {
 
   await applyDailySheetFormatting(sheets, sheetInfo.sheetId);
   await updateItinerarySheet(sheets, date, store);
+  await updateTimeSheet(sheets, date);
 
   return { date, store, timeIn, timeOut, duration, note: note || "" };
+}
+
+async function updateTimeSheet(sheets, date) {
+  const dailySheetInfo = await resolveSheetInfo(sheets, DAILY_SHEET_NAME);
+  const timeSheetInfo = await resolveSheetInfo(sheets, TIMESHEET_SHEET_NAME);
+  const targetDateKey = normalizeDateKey(date);
+  const dailyResponse = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${quoteSheetName(dailySheetInfo.title)}!A:E`,
+  });
+  const dailyRows = dailyResponse.data.values || [];
+  const sameDateLogs = dailyRows
+    .slice(1)
+    .filter((row) => normalizeDateKey(row[0]) === targetDateKey)
+    .map((row) => ({
+      timeIn: parseTimeToMinutes(row[2]),
+      timeOut: parseTimeToMinutes(row[3]),
+    }))
+    .filter((log) => log.timeIn !== null && log.timeOut !== null);
+
+  if (!sameDateLogs.length) return;
+
+  const firstTimeIn = Math.min(...sameDateLogs.map((log) => log.timeIn));
+  const lastTimeOut = Math.max(...sameDateLogs.map((log) => log.timeOut));
+  const rowValues = [
+    date,
+    "",
+    minutesToClock(firstTimeIn),
+    minutesToClock(lastTimeOut),
+    minutesToDuration(firstTimeIn, lastTimeOut),
+  ];
+  const timeSheetResponse = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${quoteSheetName(timeSheetInfo.title)}!A:E`,
+  });
+  const timeSheetRows = timeSheetResponse.data.values || [];
+  const targetRowIndex = timeSheetRows.findIndex(
+    (row, index) => index > 0 && normalizeDateKey(row[0]) === targetDateKey
+  );
+
+  if (targetRowIndex === -1) {
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${quoteSheetName(timeSheetInfo.title)}!A1:E1`,
+      valueInputOption: "USER_ENTERED",
+      insertDataOption: "INSERT_ROWS",
+      requestBody: {
+        values: [rowValues],
+      },
+    });
+  } else {
+    const rowNumber = targetRowIndex + 1;
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${quoteSheetName(timeSheetInfo.title)}!A${rowNumber}:E${rowNumber}`,
+      valueInputOption: "USER_ENTERED",
+      requestBody: {
+        values: [rowValues],
+      },
+    });
+  }
+
+  await applyTimeSheetFormatting(sheets, timeSheetInfo.sheetId);
+}
+
+async function applyTimeSheetFormatting(sheets, sheetId) {
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: SPREADSHEET_ID,
+    requestBody: {
+      requests: [
+        {
+          repeatCell: {
+            range: {
+              sheetId,
+              startRowIndex: 0,
+              endRowIndex: 1,
+              startColumnIndex: 0,
+              endColumnIndex: 5,
+            },
+            cell: {
+              userEnteredFormat: {
+                backgroundColor: { red: 0.09, green: 0.38, blue: 0.13 },
+                horizontalAlignment: "LEFT",
+                textFormat: {
+                  foregroundColor: { red: 1, green: 1, blue: 1 },
+                  bold: true,
+                },
+              },
+            },
+            fields:
+              "userEnteredFormat(backgroundColor,horizontalAlignment,textFormat)",
+          },
+        },
+        {
+          repeatCell: {
+            range: {
+              sheetId,
+              startRowIndex: 1,
+              startColumnIndex: 0,
+              endColumnIndex: 5,
+            },
+            cell: {
+              userEnteredFormat: {
+                backgroundColor: { red: 1, green: 1, blue: 1 },
+                horizontalAlignment: "LEFT",
+                textFormat: {
+                  foregroundColor: { red: 0, green: 0, blue: 0 },
+                  bold: false,
+                },
+              },
+            },
+            fields:
+              "userEnteredFormat(backgroundColor,horizontalAlignment,textFormat)",
+          },
+        },
+      ],
+    },
+  });
 }
 
 async function updateItinerarySheet(sheets, date, store) {
