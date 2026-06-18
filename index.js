@@ -417,6 +417,180 @@ async function appendVisit({ date, store, timeIn, timeOut, note }) {
   return { date, store, timeIn, timeOut, duration, note: note || "" };
 }
 
+function normalizeDailyRows(rows) {
+  return rows
+    .map((row) => [
+      String(row.date ?? row[0] ?? "").trim(),
+      String(row.store ?? row[1] ?? "").trim(),
+      String(row.timeIn ?? row[2] ?? "").trim(),
+      String(row.timeOut ?? row[3] ?? "").trim(),
+      String(row.duration ?? row[4] ?? "").trim(),
+      String(row.note ?? row[5] ?? "").trim(),
+    ])
+    .filter((row) => row.some(Boolean));
+}
+
+async function readDailyRows() {
+  const sheets = getSheetsClient();
+  const sheetInfo = await resolveSheetInfo(sheets, DAILY_SHEET_NAME);
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${quoteSheetName(sheetInfo.title)}!A2:F`,
+  });
+
+  return normalizeDailyRows(response.data.values || []).map((row) => ({
+    date: row[0],
+    store: row[1],
+    timeIn: row[2],
+    timeOut: row[3],
+    duration: row[4],
+    note: row[5],
+  }));
+}
+
+async function replaceDailyRows(rows) {
+  const sheets = getSheetsClient();
+  const dailySheetInfo = await resolveSheetInfo(sheets, DAILY_SHEET_NAME);
+  const normalizedRows = normalizeDailyRows(rows).map((row) => [
+    row[0],
+    row[1],
+    row[2],
+    row[3],
+    calculateDuration(row[2], row[3]) || row[4],
+    row[5],
+  ]);
+
+  await sheets.spreadsheets.values.clear({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${quoteSheetName(dailySheetInfo.title)}!A2:F`,
+  });
+
+  if (normalizedRows.length) {
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${quoteSheetName(dailySheetInfo.title)}!A2:F${normalizedRows.length + 1}`,
+      valueInputOption: "USER_ENTERED",
+      requestBody: {
+        values: normalizedRows,
+      },
+    });
+  }
+
+  await applyDailySheetFormatting(sheets, dailySheetInfo.sheetId);
+  await rebuildDerivedSheetsFromDailyRows(sheets, normalizedRows);
+
+  return normalizedRows.map((row) => ({
+    date: row[0],
+    store: row[1],
+    timeIn: row[2],
+    timeOut: row[3],
+    duration: row[4],
+    note: row[5],
+  }));
+}
+
+async function rebuildDerivedSheetsFromDailyRows(sheets, rows) {
+  await rebuildItinerarySheetFromDailyRows(sheets, rows);
+  await rebuildTimeSheetFromDailyRows(sheets, rows);
+}
+
+async function rebuildItinerarySheetFromDailyRows(sheets, rows) {
+  const sheetInfo = await resolveSheetInfo(sheets, ITINERARY_SHEET_NAME);
+  const byDate = new Map();
+
+  for (const row of rows) {
+    const date = row[0];
+    const store = row[1];
+    const dateKey = normalizeDateKey(date);
+
+    if (!date || !store || !dateKey) continue;
+
+    if (!byDate.has(dateKey)) {
+      byDate.set(dateKey, { date, stores: [] });
+    }
+
+    const group = byDate.get(dateKey);
+
+    if (!group.stores.includes(store) && group.stores.length < 8) {
+      group.stores.push(store);
+    }
+  }
+
+  const values = Array.from(byDate.values()).map((group) => {
+    const row = [formatItineraryDate(group.date), ...group.stores];
+
+    while (row.length < 9) row.push("");
+
+    return row;
+  });
+
+  await sheets.spreadsheets.values.clear({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${quoteSheetName(sheetInfo.title)}!A2:I`,
+  });
+
+  if (values.length) {
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${quoteSheetName(sheetInfo.title)}!A2:I${values.length + 1}`,
+      valueInputOption: "USER_ENTERED",
+      requestBody: { values },
+    });
+  }
+
+  await applyItinerarySheetFormatting(sheets, sheetInfo.sheetId);
+}
+
+async function rebuildTimeSheetFromDailyRows(sheets, rows) {
+  const sheetInfo = await resolveSheetInfo(sheets, TIMESHEET_SHEET_NAME);
+  const byDate = new Map();
+
+  for (const row of rows) {
+    const date = row[0];
+    const dateKey = normalizeDateKey(date);
+    const timeIn = parseTimeToMinutes(row[2]);
+    const timeOut = parseTimeToMinutes(row[3]);
+
+    if (!date || !dateKey || timeIn === null || timeOut === null) continue;
+
+    if (!byDate.has(dateKey)) {
+      byDate.set(dateKey, {
+        date,
+        firstTimeIn: timeIn,
+        lastTimeOut: timeOut,
+      });
+    }
+
+    const group = byDate.get(dateKey);
+    group.firstTimeIn = Math.min(group.firstTimeIn, timeIn);
+    group.lastTimeOut = Math.max(group.lastTimeOut, timeOut);
+  }
+
+  const values = Array.from(byDate.values()).map((group) => [
+    group.date,
+    "",
+    minutesToClock(group.firstTimeIn),
+    minutesToClock(group.lastTimeOut),
+    minutesToDuration(group.firstTimeIn, group.lastTimeOut),
+  ]);
+
+  await sheets.spreadsheets.values.clear({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${quoteSheetName(sheetInfo.title)}!A2:E`,
+  });
+
+  if (values.length) {
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${quoteSheetName(sheetInfo.title)}!A2:E${values.length + 1}`,
+      valueInputOption: "USER_ENTERED",
+      requestBody: { values },
+    });
+  }
+
+  await applyTimeSheetFormatting(sheets, sheetInfo.sheetId);
+}
+
 async function updateTimeSheet(sheets, date) {
   const dailySheetInfo = await resolveSheetInfo(sheets, DAILY_SHEET_NAME);
   const timeSheetInfo = await resolveSheetInfo(sheets, TIMESHEET_SHEET_NAME);
@@ -740,6 +914,26 @@ app.get("/api/stores", async (req, res) => {
   }
 });
 
+app.get("/api/daily", async (req, res) => {
+  try {
+    const rows = await readDailyRows();
+    res.json({ rows });
+  } catch (error) {
+    const message = formatApiError(error);
+    res.status(error.status || 500).json({ message });
+  }
+});
+
+app.put("/api/daily", async (req, res) => {
+  try {
+    const rows = await replaceDailyRows(Array.isArray(req.body.rows) ? req.body.rows : []);
+    res.json({ rows });
+  } catch (error) {
+    const message = formatApiError(error);
+    res.status(error.status || 500).json({ message });
+  }
+});
+
 app.post("/api/visits", async (req, res) => {
   try {
     const saved = await appendVisit({
@@ -955,8 +1149,26 @@ app.get("/", (req, res) => {
     }
 
     button:disabled {
-      cursor: wait;
+      cursor: not-allowed;
       opacity: 0.7;
+    }
+
+    .capture-button {
+      width: 100%;
+      min-height: 54px;
+      font-size: 18px;
+    }
+
+    .capture-button.secondary {
+      background: #315f8c;
+    }
+
+    .capture-button.secondary:hover {
+      background: #25496c;
+    }
+
+    .compact-actions {
+      justify-content: flex-start;
     }
 
     .status {
@@ -1014,6 +1226,66 @@ app.get("/", (req, res) => {
       font-weight: 700;
     }
 
+    .table-panel {
+      margin-top: 18px;
+      overflow: hidden;
+    }
+
+    .table-toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .table-toolbar h2 {
+      margin: 0;
+      font-size: 18px;
+    }
+
+    .table-actions {
+      display: flex;
+      gap: 10px;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      background: #ffffff;
+    }
+
+    table {
+      width: 100%;
+      min-width: 760px;
+      border-collapse: collapse;
+      color: #000000;
+      font-size: 14px;
+    }
+
+    th {
+      background: #176122;
+      color: #ffffff;
+      font-weight: 800;
+      text-align: left;
+      border: 1px solid #d9d9d9;
+      padding: 4px 6px;
+    }
+
+    td {
+      min-width: 110px;
+      height: 26px;
+      background: #ffffff;
+      color: #000000;
+      border: 1px solid #d9d9d9;
+      padding: 3px 6px;
+      outline: none;
+    }
+
+    td:focus {
+      box-shadow: inset 0 0 0 2px #1a73e8;
+    }
+
     @media (max-width: 760px) {
       main {
         width: min(100% - 20px, 960px);
@@ -1021,7 +1293,9 @@ app.get("/", (req, res) => {
       }
 
       .topbar,
-      .actions {
+      .actions,
+      .table-toolbar,
+      .table-actions {
         align-items: stretch;
         flex-direction: column;
       }
@@ -1068,12 +1342,12 @@ app.get("/", (req, res) => {
 
           <label>
             Time In
-            <input id="timeIn" name="timeIn" type="time" required>
+            <button id="timeInButton" class="capture-button" type="button">Time In</button>
           </label>
 
           <label>
             Time Out
-            <input id="timeOut" name="timeOut" type="time" required>
+            <button id="timeOutButton" class="capture-button secondary" type="button" disabled>Time Out</button>
           </label>
 
           <label>
@@ -1087,9 +1361,8 @@ app.get("/", (req, res) => {
           </label>
         </div>
 
-        <div class="actions">
+        <div class="actions compact-actions">
           <div class="status" id="status" role="status" aria-live="polite"></div>
-          <button id="saveButton" type="submit">Save Visit</button>
         </div>
       </form>
 
@@ -1104,18 +1377,49 @@ app.get("/", (req, res) => {
         </dl>
       </aside>
     </section>
+
+    <section class="panel table-panel">
+      <div class="table-toolbar">
+        <h2>Daily Sheet</h2>
+        <div class="table-actions">
+          <button id="addRowButton" type="button">Add Row</button>
+          <button id="saveTableButton" type="button">Save Table Changes</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table id="dailyTable" aria-label="Daily Sheet editable table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Store</th>
+              <th>Time_In</th>
+              <th>Time_Out</th>
+              <th>Duration</th>
+              <th>Note</th>
+            </tr>
+          </thead>
+          <tbody id="dailyTableBody">
+            <tr><td colspan="6">Loading Daily Sheet...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
   </main>
 
   <script>
     const form = document.getElementById("visitForm");
     const dateInput = document.getElementById("date");
     const storeInput = document.getElementById("store");
-    const timeInInput = document.getElementById("timeIn");
-    const timeOutInput = document.getElementById("timeOut");
+    const timeInButton = document.getElementById("timeInButton");
+    const timeOutButton = document.getElementById("timeOutButton");
     const noteInput = document.getElementById("note");
     const durationOutput = document.getElementById("duration");
     const statusOutput = document.getElementById("status");
-    const saveButton = document.getElementById("saveButton");
+    const dailyTableBody = document.getElementById("dailyTableBody");
+    const addRowButton = document.getElementById("addRowButton");
+    const saveTableButton = document.getElementById("saveTableButton");
+    let currentEntry = null;
+    let dailyRows = [];
 
     function localDateValue() {
       const now = new Date();
@@ -1128,11 +1432,8 @@ app.get("/", (req, res) => {
       return String(now.getHours()).padStart(2, "0") + ":" + String(now.getMinutes()).padStart(2, "0");
     }
 
-    function setAutomaticDateAndTime() {
-      const currentTime = localTimeValue();
+    function setAutomaticDate() {
       dateInput.value = localDateValue();
-      timeInInput.value = currentTime;
-      timeOutInput.value = currentTime;
     }
 
     function setStatus(message, type = "") {
@@ -1154,14 +1455,87 @@ app.get("/", (req, res) => {
     }
 
     function refreshPreview() {
-      const duration = durationBetween(timeInInput.value, timeOutInput.value);
+      const timeIn = currentEntry ? currentEntry.timeIn : "";
+      const timeOut = currentEntry ? currentEntry.timeOut : "";
+      const duration = durationBetween(timeIn, timeOut);
       durationOutput.textContent = duration;
-      document.getElementById("previewDate").textContent = dateInput.value || "-";
-      document.getElementById("previewStore").textContent = storeInput.value || "-";
+      document.getElementById("previewDate").textContent = currentEntry ? currentEntry.date : dateInput.value || "-";
+      document.getElementById("previewStore").textContent = currentEntry ? currentEntry.store : storeInput.value || "-";
       document.getElementById("previewTime").textContent =
-        timeInInput.value && timeOutInput.value ? timeInInput.value + " - " + timeOutInput.value : "-";
+        timeIn && timeOut ? timeIn + " - " + timeOut : timeIn ? timeIn + " - pending" : "-";
       document.getElementById("previewDuration").textContent = duration;
-      document.getElementById("previewNote").textContent = noteInput.value || "-";
+      document.getElementById("previewNote").textContent = currentEntry ? currentEntry.note || "-" : noteInput.value || "-";
+    }
+
+    function setPunchState(hasOpenEntry) {
+      timeInButton.disabled = hasOpenEntry;
+      timeOutButton.disabled = !hasOpenEntry;
+      dateInput.disabled = hasOpenEntry;
+      storeInput.disabled = hasOpenEntry;
+    }
+
+    function renderDailyTable() {
+      const rows = currentEntry ? dailyRows.concat([currentEntry]) : dailyRows;
+
+      if (!rows.length) {
+        dailyTableBody.innerHTML = '<tr><td colspan="6">No rows yet.</td></tr>';
+        return;
+      }
+
+      dailyTableBody.innerHTML = "";
+
+      rows.forEach((row) => {
+        const tr = document.createElement("tr");
+        const values = [
+          row.date || "",
+          row.store || "",
+          row.timeIn || "",
+          row.timeOut || "",
+          row.duration || durationBetween(row.timeIn, row.timeOut),
+          row.note || ""
+        ];
+
+        values.forEach((value, cellIndex) => {
+          const td = document.createElement("td");
+          td.textContent = value;
+          td.contentEditable = currentEntry && row === currentEntry ? "false" : "true";
+          td.dataset.field = ["date", "store", "timeIn", "timeOut", "duration", "note"][cellIndex];
+          tr.appendChild(td);
+        });
+
+        dailyTableBody.appendChild(tr);
+      });
+    }
+
+    function getEditedTableRows() {
+      return Array.from(dailyTableBody.querySelectorAll("tr"))
+        .filter((tr) => tr.children.length === 6)
+        .map((tr) => {
+          const cells = Array.from(tr.children).map((cell) => cell.textContent.trim());
+          return {
+            date: cells[0],
+            store: cells[1],
+            timeIn: cells[2],
+            timeOut: cells[3],
+            duration: durationBetween(cells[2], cells[3]) || cells[4],
+            note: cells[5]
+          };
+        })
+        .filter((row) => row.date || row.store || row.timeIn || row.timeOut || row.note);
+    }
+
+    async function loadDailyRows() {
+      try {
+        const response = await fetch("/api/daily");
+        const data = await response.json();
+
+        if (!response.ok) throw new Error(data.message || "Unable to load Daily Sheet.");
+
+        dailyRows = data.rows || [];
+        renderDailyTable();
+      } catch (error) {
+        dailyTableBody.innerHTML = '<tr><td colspan="6">' + error.message + '</td></tr>';
+      }
     }
 
     async function loadStores() {
@@ -1190,24 +1564,61 @@ app.get("/", (req, res) => {
       }
     }
 
-    form.addEventListener("input", refreshPreview);
-    form.addEventListener("change", refreshPreview);
+    noteInput.addEventListener("input", () => {
+      if (currentEntry) {
+        currentEntry.note = noteInput.value;
+        renderDailyTable();
+      }
 
-    form.addEventListener("submit", async (event) => {
+      refreshPreview();
+    });
+
+    form.addEventListener("submit", (event) => {
       event.preventDefault();
-      saveButton.disabled = true;
+    });
+
+    timeInButton.addEventListener("click", () => {
+      if (!dateInput.value || !storeInput.value) {
+        setStatus("Select a date and store before Time In.", "error");
+        return;
+      }
+
+      currentEntry = {
+        date: dateInput.value,
+        store: storeInput.value,
+        timeIn: localTimeValue(),
+        timeOut: "",
+        duration: "",
+        note: noteInput.value.trim()
+      };
+
+      setPunchState(true);
+      setStatus("Time In captured. Press Time Out when visit is complete.", "success");
+      renderDailyTable();
+      refreshPreview();
+    });
+
+    timeOutButton.addEventListener("click", async () => {
+      if (!currentEntry) return;
+
+      currentEntry.timeOut = localTimeValue();
+      currentEntry.duration = durationBetween(currentEntry.timeIn, currentEntry.timeOut);
+      currentEntry.note = noteInput.value.trim();
+      timeOutButton.disabled = true;
       setStatus("Saving...");
+      renderDailyTable();
+      refreshPreview();
 
       try {
         const response = await fetch("/api/visits", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            date: dateInput.value,
-            store: storeInput.value,
-            timeIn: timeInInput.value,
-            timeOut: timeOutInput.value,
-            note: noteInput.value
+            date: currentEntry.date,
+            store: currentEntry.store,
+            timeIn: currentEntry.timeIn,
+            timeOut: currentEntry.timeOut,
+            note: currentEntry.note
           })
         });
 
@@ -1215,18 +1626,61 @@ app.get("/", (req, res) => {
         if (!response.ok) throw new Error(data.message || "Unable to save visit.");
 
         setStatus("Saved to Daily Sheet.", "success");
-        setAutomaticDateAndTime();
+        currentEntry = null;
+        setPunchState(false);
+        setAutomaticDate();
         noteInput.value = "";
+        await loadDailyRows();
         refreshPreview();
       } catch (error) {
         setStatus(error.message, "error");
+        setPunchState(true);
       } finally {
-        saveButton.disabled = false;
+        renderDailyTable();
       }
     });
 
-    setAutomaticDateAndTime();
+    addRowButton.addEventListener("click", () => {
+      dailyRows.push({
+        date: dateInput.value || localDateValue(),
+        store: "",
+        timeIn: "",
+        timeOut: "",
+        duration: "",
+        note: ""
+      });
+      renderDailyTable();
+      setStatus("New editable row added. Save table changes when ready.");
+    });
+
+    saveTableButton.addEventListener("click", async () => {
+      saveTableButton.disabled = true;
+      setStatus("Saving table changes...");
+
+      try {
+        const response = await fetch("/api/daily", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ rows: getEditedTableRows() })
+        });
+        const data = await response.json();
+
+        if (!response.ok) throw new Error(data.message || "Unable to save table changes.");
+
+        dailyRows = data.rows || [];
+        setStatus("Table changes saved to Daily Sheet.", "success");
+        renderDailyTable();
+      } catch (error) {
+        setStatus(error.message, "error");
+      } finally {
+        saveTableButton.disabled = false;
+      }
+    });
+
+    setAutomaticDate();
+    setPunchState(false);
     loadStores();
+    loadDailyRows();
     refreshPreview();
   </script>
 </body>
