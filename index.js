@@ -123,6 +123,50 @@ function getSheetsClient() {
   return google.sheets({ version: "v4", auth });
 }
 
+function quoteSheetName(sheetName) {
+  return `'${String(sheetName).replaceAll("'", "''")}'`;
+}
+
+function normalizeSheetTitle(sheetName) {
+  return String(sheetName || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+async function resolveSheetInfo(sheets, preferredName) {
+  const metadata = await sheets.spreadsheets.get({
+    spreadsheetId: SPREADSHEET_ID,
+    fields: "sheets.properties(sheetId,title)",
+  });
+
+  const sheetInfos = (metadata.data.sheets || [])
+    .map((sheet) => sheet.properties)
+    .filter((properties) => properties && properties.title);
+  const titles = sheetInfos.map((sheet) => sheet.title);
+  const preferred = String(preferredName || "").trim();
+  const exact = sheetInfos.find((sheet) => sheet.title === preferred);
+
+  if (exact) return exact;
+
+  const normalizedPreferred = normalizeSheetTitle(preferred);
+  const normalized = sheetInfos.find(
+    (sheet) => normalizeSheetTitle(sheet.title) === normalizedPreferred
+  );
+
+  if (normalized) return normalized;
+
+  const error = new Error(
+    `Sheet tab "${preferred}" was not found. Available tabs: ${titles.join(", ")}`
+  );
+  error.status = 400;
+  throw error;
+}
+
+async function resolveSheetName(sheets, preferredName) {
+  const sheetInfo = await resolveSheetInfo(sheets, preferredName);
+  return sheetInfo.title;
+}
+
 function todayInLocalInputFormat() {
   const now = new Date();
   const offset = now.getTimezoneOffset();
@@ -167,9 +211,10 @@ async function readStores() {
 
 async function readStoresWithSheetsApi() {
   const sheets = getSheetsClient();
+  const sheetName = await resolveSheetName(sheets, STORE_SHEET_NAME);
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
-    range: `'${STORE_SHEET_NAME}'!A:A`,
+    range: `${quoteSheetName(sheetName)}!A1:A`,
   });
 
   const rows = response.data.values || [];
@@ -245,6 +290,7 @@ function parseCsv(csv) {
 
 async function appendVisit({ date, store, timeIn, timeOut, note }) {
   const sheets = getSheetsClient();
+  const sheetInfo = await resolveSheetInfo(sheets, DAILY_SHEET_NAME);
   const duration = calculateDuration(timeIn, timeOut);
 
   if (!date || !store || !timeIn || !timeOut) {
@@ -255,7 +301,7 @@ async function appendVisit({ date, store, timeIn, timeOut, note }) {
 
   await sheets.spreadsheets.values.append({
     spreadsheetId: SPREADSHEET_ID,
-    range: `'${DAILY_SHEET_NAME}'!A:F`,
+    range: `${quoteSheetName(sheetInfo.title)}!A1:F1`,
     valueInputOption: "USER_ENTERED",
     insertDataOption: "INSERT_ROWS",
     requestBody: {
@@ -263,7 +309,64 @@ async function appendVisit({ date, store, timeIn, timeOut, note }) {
     },
   });
 
+  await applyDailySheetFormatting(sheets, sheetInfo.sheetId);
+
   return { date, store, timeIn, timeOut, duration, note: note || "" };
+}
+
+async function applyDailySheetFormatting(sheets, sheetId) {
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: SPREADSHEET_ID,
+    requestBody: {
+      requests: [
+        {
+          repeatCell: {
+            range: {
+              sheetId,
+              startRowIndex: 0,
+              endRowIndex: 1,
+              startColumnIndex: 0,
+              endColumnIndex: 6,
+            },
+            cell: {
+              userEnteredFormat: {
+                backgroundColor: { red: 0.09, green: 0.38, blue: 0.13 },
+                horizontalAlignment: "LEFT",
+                textFormat: {
+                  foregroundColor: { red: 1, green: 1, blue: 1 },
+                  bold: true,
+                },
+              },
+            },
+            fields:
+              "userEnteredFormat(backgroundColor,horizontalAlignment,textFormat)",
+          },
+        },
+        {
+          repeatCell: {
+            range: {
+              sheetId,
+              startRowIndex: 1,
+              startColumnIndex: 0,
+              endColumnIndex: 6,
+            },
+            cell: {
+              userEnteredFormat: {
+                backgroundColor: { red: 1, green: 1, blue: 1 },
+                horizontalAlignment: "LEFT",
+                textFormat: {
+                  foregroundColor: { red: 0, green: 0, blue: 0 },
+                  bold: false,
+                },
+              },
+            },
+            fields:
+              "userEnteredFormat(backgroundColor,horizontalAlignment,textFormat)",
+          },
+        },
+      ],
+    },
+  });
 }
 
 app.get("/api/stores", async (req, res) => {
