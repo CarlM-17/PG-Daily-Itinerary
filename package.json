@@ -1,0 +1,16 @@
+{
+  "name": "pg-daily-itinerary-store-visits",
+  "version": "1.0.0",
+  "description": "PG Daily Itinerary Store Visits web app linked to Google Sheets.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "googleapis": "^140.0.1"
+  }
+}
