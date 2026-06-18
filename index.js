@@ -20,19 +20,25 @@ function escapeHtml(value) {
 }
 
 function getPrivateKey() {
+  const jsonCredentials = getServiceAccountJson();
+
+  if (jsonCredentials && jsonCredentials.private_key) {
+    return normalizePrivateKey(jsonCredentials.private_key);
+  }
+
   if (process.env.GOOGLE_PRIVATE_KEY_BASE64) {
     return normalizePrivateKey(
       Buffer.from(process.env.GOOGLE_PRIVATE_KEY_BASE64, "base64").toString("utf8")
     );
   }
 
-  if (process.env.GOOGLE_PRIVATE_KEY) {
-    return normalizePrivateKey(process.env.GOOGLE_PRIVATE_KEY);
-  }
+  const key =
+    process.env.GOOGLE_PRIVATE_KEY ||
+    process.env.Google_Private_Key ||
+    process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY;
 
-  if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
-    const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
-    return normalizePrivateKey(credentials.private_key);
+  if (key) {
+    return normalizePrivateKey(key);
   }
 
   return "";
@@ -52,16 +58,44 @@ function normalizePrivateKey(value) {
 }
 
 function getClientEmail() {
-  if (process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL) {
-    return process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
+  const jsonCredentials = getServiceAccountJson();
+
+  if (jsonCredentials && jsonCredentials.client_email) {
+    return jsonCredentials.client_email;
   }
 
-  if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
-    const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
-    return credentials.client_email;
+  const email =
+    process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL ||
+    process.env.Google_Service_Account_email ||
+    process.env.GOOGLE_CLIENT_EMAIL ||
+    process.env.CLIENT_EMAIL;
+
+  if (email) {
+    return String(email).trim();
   }
 
   return "";
+}
+
+function getServiceAccountJson() {
+  const json =
+    process.env.GOOGLE_SERVICE_ACCOUNT_JSON ||
+    process.env.Google_Service_Account_JSON ||
+    process.env.GOOGLE_CREDENTIALS_JSON;
+
+  if (json) {
+    return JSON.parse(json);
+  }
+
+  if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON_BASE64) {
+    const decoded = Buffer.from(
+      process.env.GOOGLE_SERVICE_ACCOUNT_JSON_BASE64,
+      "base64"
+    ).toString("utf8");
+    return JSON.parse(decoded);
+  }
+
+  return null;
 }
 
 function getSheetsClient() {
@@ -71,6 +105,12 @@ function getSheetsClient() {
   if (!clientEmail || !privateKey) {
     throw new Error(
       "Missing Google credentials. Set GOOGLE_SERVICE_ACCOUNT_EMAIL and GOOGLE_PRIVATE_KEY, or GOOGLE_SERVICE_ACCOUNT_JSON."
+    );
+  }
+
+  if (!privateKey.includes("-----BEGIN PRIVATE KEY-----")) {
+    throw new Error(
+      "Invalid Google private key. Use the service account private_key value, not private_key_id."
     );
   }
 
@@ -246,9 +286,39 @@ app.post("/api/visits", async (req, res) => {
     });
     res.status(201).json({ visit: saved });
   } catch (error) {
-    res.status(error.status || 500).json({ message: error.message });
+    const message = formatApiError(error);
+    res.status(error.status || 500).json({ message });
   }
 });
+
+function formatApiError(error) {
+  const message = String(error.message || "");
+
+  if (
+    message.includes("invalid_grant") ||
+    message.includes("Invalid JWT Signature")
+  ) {
+    return (
+      "Google credential error: invalid JWT signature. The service account email " +
+      "and private key do not match, or the key was deleted/disabled. Use client_email " +
+      "and private_key from the same service account JSON file."
+    );
+  }
+
+  if (
+    message.includes("DECODER routines::unsupported") ||
+    message.includes("PEM routines") ||
+    message.includes("private key")
+  ) {
+    return (
+      "Google credential error: the private key is invalid. In Railway, set " +
+      "GOOGLE_SERVICE_ACCOUNT_EMAIL to the service account email and GOOGLE_PRIVATE_KEY " +
+      "to the matching private_key value including BEGIN/END PRIVATE KEY. Do not use private_key_id."
+    );
+  }
+
+  return message || "Unable to save visit.";
+}
 
 app.get("/", (req, res) => {
   const today = escapeHtml(todayInLocalInputFormat());
