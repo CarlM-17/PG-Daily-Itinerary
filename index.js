@@ -20,16 +20,35 @@ function escapeHtml(value) {
 }
 
 function getPrivateKey() {
+  if (process.env.GOOGLE_PRIVATE_KEY_BASE64) {
+    return normalizePrivateKey(
+      Buffer.from(process.env.GOOGLE_PRIVATE_KEY_BASE64, "base64").toString("utf8")
+    );
+  }
+
   if (process.env.GOOGLE_PRIVATE_KEY) {
-    return process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n");
+    return normalizePrivateKey(process.env.GOOGLE_PRIVATE_KEY);
   }
 
   if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
     const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
-    return credentials.private_key;
+    return normalizePrivateKey(credentials.private_key);
   }
 
   return "";
+}
+
+function normalizePrivateKey(value) {
+  let key = String(value || "").trim();
+
+  if (
+    (key.startsWith('"') && key.endsWith('"')) ||
+    (key.startsWith("'") && key.endsWith("'"))
+  ) {
+    key = key.slice(1, -1);
+  }
+
+  return key.replace(/\\n/g, "\n");
 }
 
 function getClientEmail() {
@@ -99,6 +118,14 @@ function calculateDuration(timeIn, timeOut) {
 }
 
 async function readStores() {
+  try {
+    return await readStoresWithSheetsApi();
+  } catch (error) {
+    return readStoresFromPublicCsv();
+  }
+}
+
+async function readStoresWithSheetsApi() {
   const sheets = getSheetsClient();
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
@@ -106,6 +133,27 @@ async function readStores() {
   });
 
   const rows = response.data.values || [];
+  return cleanStoreRows(rows);
+}
+
+async function readStoresFromPublicCsv() {
+  const url =
+    `https://docs.google.com/spreadsheets/d/${encodeURIComponent(SPREADSHEET_ID)}` +
+    `/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(STORE_SHEET_NAME)}`;
+  const response = await fetch(url);
+
+  if (!response.ok) {
+    throw new Error(
+      "Unable to load Store sheet. Check credentials or make the spreadsheet visible to anyone with the link."
+    );
+  }
+
+  const csv = await response.text();
+  const rows = parseCsv(csv);
+  return cleanStoreRows(rows);
+}
+
+function cleanStoreRows(rows) {
   const stores = rows
     .flat()
     .map((store) => String(store || "").trim())
@@ -116,6 +164,43 @@ async function readStores() {
   }
 
   return [...new Set(stores)];
+}
+
+function parseCsv(csv) {
+  const rows = [];
+  let row = [];
+  let value = "";
+  let inQuotes = false;
+
+  for (let index = 0; index < csv.length; index += 1) {
+    const char = csv[index];
+    const next = csv[index + 1];
+
+    if (char === '"' && inQuotes && next === '"') {
+      value += '"';
+      index += 1;
+    } else if (char === '"') {
+      inQuotes = !inQuotes;
+    } else if (char === "," && !inQuotes) {
+      row.push(value);
+      value = "";
+    } else if ((char === "\n" || char === "\r") && !inQuotes) {
+      if (char === "\r" && next === "\n") index += 1;
+      row.push(value);
+      rows.push(row);
+      row = [];
+      value = "";
+    } else {
+      value += char;
+    }
+  }
+
+  if (value || row.length) {
+    row.push(value);
+    rows.push(row);
+  }
+
+  return rows;
 }
 
 async function appendVisit({ date, store, timeIn, timeOut, note }) {
@@ -497,6 +582,24 @@ app.get("/", (req, res) => {
     const statusOutput = document.getElementById("status");
     const saveButton = document.getElementById("saveButton");
 
+    function localDateValue() {
+      const now = new Date();
+      const offset = now.getTimezoneOffset();
+      return new Date(now.getTime() - offset * 60000).toISOString().slice(0, 10);
+    }
+
+    function localTimeValue() {
+      const now = new Date();
+      return String(now.getHours()).padStart(2, "0") + ":" + String(now.getMinutes()).padStart(2, "0");
+    }
+
+    function setAutomaticDateAndTime() {
+      const currentTime = localTimeValue();
+      dateInput.value = localDateValue();
+      timeInInput.value = currentTime;
+      timeOutInput.value = currentTime;
+    }
+
     function setStatus(message, type = "") {
       statusOutput.textContent = message;
       statusOutput.className = "status" + (type ? " " + type : "");
@@ -577,8 +680,7 @@ app.get("/", (req, res) => {
         if (!response.ok) throw new Error(data.message || "Unable to save visit.");
 
         setStatus("Saved to Daily Sheet.", "success");
-        timeInInput.value = "";
-        timeOutInput.value = "";
+        setAutomaticDateAndTime();
         noteInput.value = "";
         refreshPreview();
       } catch (error) {
@@ -588,6 +690,7 @@ app.get("/", (req, res) => {
       }
     });
 
+    setAutomaticDateAndTime();
     loadStores();
     refreshPreview();
   </script>
