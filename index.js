@@ -1253,6 +1253,7 @@ app.get("/", (req, res) => {
     .table-wrap {
       overflow-x: auto;
       background: #ffffff;
+      -webkit-overflow-scrolling: touch;
     }
 
     table {
@@ -1311,9 +1312,13 @@ app.get("/", (req, res) => {
     }
 
     @media (max-width: 760px) {
+      body {
+        background: var(--page);
+      }
+
       main {
-        width: min(100% - 20px, 960px);
-        padding: 20px 0;
+        width: min(100% - 12px, 960px);
+        padding: 12px 0 18px;
       }
 
       .topbar,
@@ -1321,6 +1326,16 @@ app.get("/", (req, res) => {
       .table-toolbar {
         align-items: stretch;
         flex-direction: column;
+      }
+
+      .topbar {
+        gap: 10px;
+        margin-bottom: 12px;
+      }
+
+      h1 {
+        font-size: 30px;
+        line-height: 1.04;
       }
 
       .sheet-link,
@@ -1337,6 +1352,105 @@ app.get("/", (req, res) => {
       form,
       .summary {
         padding: 16px;
+      }
+
+      input,
+      select,
+      textarea {
+        min-height: 48px;
+        font-size: 16px;
+      }
+
+      .capture-button {
+        min-height: 58px;
+      }
+
+      .summary h2,
+      .table-toolbar h2 {
+        font-size: 17px;
+      }
+
+      .table-panel {
+        margin-top: 12px;
+      }
+
+      .table-toolbar {
+        padding: 12px;
+      }
+
+      .table-wrap {
+        border-top: 1px solid var(--line);
+      }
+
+      table {
+        min-width: 680px;
+        font-size: 13px;
+      }
+
+      th,
+      td {
+        min-width: 104px;
+        padding: 4px;
+      }
+
+      th:first-child,
+      td:first-child {
+        position: sticky;
+        left: 0;
+        z-index: 2;
+      }
+
+      td:first-child {
+        background: #ffffff;
+      }
+
+      th:first-child {
+        z-index: 3;
+      }
+
+      .table-input,
+      .table-select,
+      .duration-cell {
+        min-height: 34px;
+        font-size: 16px;
+      }
+
+      .table-input,
+      .table-select {
+        padding: 4px 2px;
+      }
+    }
+
+    @media (max-width: 420px) {
+      h1 {
+        font-size: 25px;
+      }
+
+      form,
+      .summary {
+        padding: 12px;
+      }
+
+      .grid {
+        gap: 12px;
+      }
+
+      textarea {
+        min-height: 92px;
+      }
+
+      table {
+        min-width: 620px;
+      }
+
+      th,
+      td {
+        min-width: 96px;
+      }
+
+      th:nth-child(6),
+      td:nth-child(6) {
+        min-width: 132px;
       }
     }
   </style>
