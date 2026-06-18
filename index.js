@@ -9,6 +9,9 @@ const DAILY_SHEET_NAME = process.env.DAILY_SHEET_NAME || "Daily Sheet";
 const ITINERARY_SHEET_NAME = process.env.ITINERARY_SHEET_NAME || "Itinerary";
 const TIMESHEET_SHEET_NAME = process.env.TIMESHEET_SHEET_NAME || "TimeSheet";
 const STORE_SHEET_NAME = process.env.STORE_SHEET_NAME || "Store";
+const STORE_LIST_SHEET_NAME = process.env.STORE_LIST_SHEET_NAME || "StoreList";
+const ITINERARY_SUMMARY_SHEET_NAME =
+  process.env.ITINERARY_SUMMARY_SHEET_NAME || "Itinerary Summary";
 
 app.use(express.json());
 
@@ -162,6 +165,31 @@ async function resolveSheetInfo(sheets, preferredName) {
   );
   error.status = 400;
   throw error;
+}
+
+async function ensureSheetInfo(sheets, preferredName) {
+  try {
+    return await resolveSheetInfo(sheets, preferredName);
+  } catch (error) {
+    if (error.status !== 400) throw error;
+  }
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: SPREADSHEET_ID,
+    requestBody: {
+      requests: [
+        {
+          addSheet: {
+            properties: {
+              title: preferredName,
+            },
+          },
+        },
+      ],
+    },
+  });
+
+  return resolveSheetInfo(sheets, preferredName);
 }
 
 async function resolveSheetName(sheets, preferredName) {
@@ -345,7 +373,7 @@ function cleanStoreRows(rows) {
     .map((store) => String(store || "").trim())
     .filter(Boolean);
 
-  if (stores[0] && stores[0].toLowerCase() === "store") {
+  if (stores[0] && ["store", "stores", "storelist", "store list"].includes(stores[0].toLowerCase())) {
     stores.shift();
   }
 
@@ -413,6 +441,7 @@ async function appendVisit({ date, store, timeIn, timeOut, note }) {
   await applyDailySheetFormatting(sheets, sheetInfo.sheetId);
   await updateItinerarySheet(sheets, date, store);
   await updateTimeSheet(sheets, date);
+  await rebuildItinerarySummaryFromSheets(sheets);
 
   return { date, store, timeIn, timeOut, duration, note: note || "" };
 }
@@ -492,6 +521,276 @@ async function replaceDailyRows(rows) {
 async function rebuildDerivedSheetsFromDailyRows(sheets, rows) {
   await rebuildItinerarySheetFromDailyRows(sheets, rows);
   await rebuildTimeSheetFromDailyRows(sheets, rows);
+  await rebuildItinerarySummarySheet(sheets, rows);
+}
+
+function monthKeyFromDate(value) {
+  const key = normalizeDateKey(value);
+
+  if (!key || !key.includes("-")) return "";
+
+  return key.slice(0, 7);
+}
+
+function formatMonthLabel(monthKey) {
+  const [year, month] = String(monthKey || "").split("-").map(Number);
+
+  if (!year || !month) return monthKey;
+
+  return new Intl.DateTimeFormat("en-US", {
+    month: "long",
+    year: "numeric",
+  }).format(new Date(year, month - 1, 1));
+}
+
+function currentMonthKey() {
+  return todayInLocalInputFormat().slice(0, 7);
+}
+
+async function readStoreListRows(sheets) {
+  const sheetName = await resolveSheetName(sheets, STORE_LIST_SHEET_NAME);
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${quoteSheetName(sheetName)}!A1:A`,
+  });
+
+  return cleanStoreRows(response.data.values || []);
+}
+
+async function rebuildItinerarySummarySheet(sheets, dailyRows) {
+  const sheetInfo = await ensureSheetInfo(sheets, ITINERARY_SUMMARY_SHEET_NAME);
+  const requiredStores = await readStoreListRows(sheets);
+  const targetMonthKey = currentMonthKey();
+  const monthLabel = formatMonthLabel(targetMonthKey);
+  const visitCounts = new Map();
+  const lastVisitDates = new Map();
+
+  for (const row of dailyRows) {
+    const date = row[0];
+    const store = String(row[1] || "").trim();
+
+    if (!store || monthKeyFromDate(date) !== targetMonthKey) continue;
+
+    visitCounts.set(store, (visitCounts.get(store) || 0) + 1);
+    lastVisitDates.set(store, date);
+  }
+
+  const storeNames = requiredStores.length
+    ? requiredStores
+    : Array.from(new Set(dailyRows.map((row) => String(row[1] || "").trim()).filter(Boolean)));
+  const visitedCount = storeNames.filter((store) => visitCounts.has(store)).length;
+  const notVisitedCount = Math.max(storeNames.length - visitedCount, 0);
+  const values = [
+    ["Itinerary Summary", "", "", "", "", "", "", "", "", "", ""],
+    ["Month", monthLabel, "", "", "", "", "", "", "", "", ""],
+    ["", "", "", "", "", "", "", "", "", "", ""],
+    ["Metric", "Count", "", "Store", "Status", "Visit Count", "Last Visit", "", "Chart Data", "Count", ""],
+    summaryMonitorRow("Visited", visitedCount, storeNames[0], visitCounts, lastVisitDates, "Visited", visitedCount),
+    summaryMonitorRow("Not Visited", notVisitedCount, storeNames[1], visitCounts, lastVisitDates, "Not Visited", notVisitedCount),
+    summaryMonitorRow("Total Stores", storeNames.length, storeNames[2], visitCounts, lastVisitDates, "", ""),
+  ];
+
+  for (let index = 3; index < storeNames.length; index += 1) {
+    values.push(summaryMonitorRow("", "", storeNames[index], visitCounts, lastVisitDates, "", ""));
+  }
+
+  await sheets.spreadsheets.values.clear({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${quoteSheetName(sheetInfo.title)}!A:K`,
+  });
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${quoteSheetName(sheetInfo.title)}!A1:K${values.length}`,
+    valueInputOption: "USER_ENTERED",
+    requestBody: { values },
+  });
+
+  await applyItinerarySummaryFormatting(sheets, sheetInfo.sheetId, values.length);
+}
+
+function summaryMonitorRow(metric, count, store, visitCounts, lastVisitDates, chartLabel, chartCount) {
+  return [
+    metric,
+    count,
+    "",
+    ...summaryStoreRow(store, visitCounts, lastVisitDates),
+    "",
+    chartLabel,
+    chartCount,
+    "",
+  ];
+}
+
+function summaryStoreRow(store, visitCounts, lastVisitDates) {
+  if (!store) return ["", "", "", ""];
+
+  const count = visitCounts.get(store) || 0;
+
+  return [
+    store,
+    count > 0 ? "Visited" : "Not Visited",
+    count,
+    lastVisitDates.get(store) || "",
+  ];
+}
+
+async function rebuildItinerarySummaryFromSheets(sheets) {
+  const dailySheetInfo = await resolveSheetInfo(sheets, DAILY_SHEET_NAME);
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${quoteSheetName(dailySheetInfo.title)}!A2:F`,
+  });
+  const rows = normalizeDailyRows(response.data.values || []);
+
+  await rebuildItinerarySummarySheet(sheets, rows);
+}
+
+async function applyItinerarySummaryFormatting(sheets, sheetId, rowCount) {
+  const spreadsheet = await sheets.spreadsheets.get({
+    spreadsheetId: SPREADSHEET_ID,
+    fields: "sheets.properties(sheetId),sheets.charts.chartId",
+  });
+  const summarySheet = (spreadsheet.data.sheets || []).find(
+    (sheet) => sheet.properties && sheet.properties.sheetId === sheetId
+  );
+  const deleteChartRequests = (summarySheet.charts || []).map((chart) => ({
+    deleteEmbeddedObject: {
+      objectId: chart.chartId,
+    },
+  }));
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: SPREADSHEET_ID,
+    requestBody: {
+      requests: [
+        ...deleteChartRequests,
+        {
+          repeatCell: {
+            range: {
+              sheetId,
+              startRowIndex: 0,
+              endRowIndex: Math.max(rowCount, 8),
+              startColumnIndex: 0,
+              endColumnIndex: 11,
+            },
+            cell: {
+              userEnteredFormat: {
+                backgroundColor: { red: 1, green: 1, blue: 1 },
+                textFormat: {
+                  foregroundColor: { red: 0, green: 0, blue: 0 },
+                  bold: false,
+                },
+              },
+            },
+            fields: "userEnteredFormat(backgroundColor,textFormat)",
+          },
+        },
+        {
+          repeatCell: {
+            range: {
+              sheetId,
+              startRowIndex: 0,
+              endRowIndex: 1,
+              startColumnIndex: 0,
+              endColumnIndex: 11,
+            },
+            cell: {
+              userEnteredFormat: {
+                backgroundColor: { red: 0.09, green: 0.38, blue: 0.13 },
+                textFormat: {
+                  foregroundColor: { red: 1, green: 1, blue: 1 },
+                  bold: true,
+                  fontSize: 14,
+                },
+              },
+            },
+            fields: "userEnteredFormat(backgroundColor,textFormat)",
+          },
+        },
+        {
+          repeatCell: {
+            range: {
+              sheetId,
+              startRowIndex: 3,
+              endRowIndex: 4,
+              startColumnIndex: 0,
+              endColumnIndex: 10,
+            },
+            cell: {
+              userEnteredFormat: {
+                backgroundColor: { red: 0.09, green: 0.38, blue: 0.13 },
+                textFormat: {
+                  foregroundColor: { red: 1, green: 1, blue: 1 },
+                  bold: true,
+                },
+              },
+            },
+            fields: "userEnteredFormat(backgroundColor,textFormat)",
+          },
+        },
+        {
+          autoResizeDimensions: {
+            dimensions: {
+              sheetId,
+              dimension: "COLUMNS",
+              startIndex: 0,
+              endIndex: 10,
+            },
+          },
+        },
+        {
+          addChart: {
+            chart: {
+              spec: {
+                title: "Monthly Store Visit Coverage",
+                pieChart: {
+                  legendPosition: "RIGHT_LEGEND",
+                  domain: {
+                    sourceRange: {
+                      sources: [
+                        {
+                          sheetId,
+                          startRowIndex: 4,
+                          endRowIndex: 6,
+                          startColumnIndex: 8,
+                          endColumnIndex: 9,
+                        },
+                      ],
+                    },
+                  },
+                  series: {
+                    sourceRange: {
+                      sources: [
+                        {
+                          sheetId,
+                          startRowIndex: 4,
+                          endRowIndex: 6,
+                          startColumnIndex: 9,
+                          endColumnIndex: 10,
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+              position: {
+                overlayPosition: {
+                  anchorCell: {
+                    sheetId,
+                    rowIndex: 1,
+                    columnIndex: 10,
+                  },
+                  widthPixels: 430,
+                  heightPixels: 280,
+                },
+              },
+            },
+          },
+        },
+      ],
+    },
+  });
 }
 
 async function rebuildItinerarySheetFromDailyRows(sheets, rows) {
