@@ -590,9 +590,8 @@ async function rebuildItinerarySummarySheet(sheets, dailyRows) {
   await applyItinerarySummaryFormatting(sheets, sheetInfo.sheetId, values.length);
 }
 
-async function buildItinerarySummaryData(sheets, dailyRows) {
+async function buildItinerarySummaryData(sheets, dailyRows, targetMonthKey = currentMonthKey()) {
   const requiredStores = await readStoreListRows(sheets);
-  const targetMonthKey = currentMonthKey();
   const monthLabel = formatMonthLabel(targetMonthKey);
   const visitCounts = new Map();
   const lastVisitDates = new Map();
@@ -1268,13 +1267,17 @@ app.post("/api/summary/rebuild", async (req, res) => {
 app.get("/api/summary", async (req, res) => {
   try {
     const sheets = getSheetsClient();
+    const requestedMonth = String(req.query.month || "").trim();
+    const monthKey = requestedMonth.match(/^\d{4}-\d{2}$/)
+      ? requestedMonth
+      : currentMonthKey();
     const dailySheetInfo = await resolveSheetInfo(sheets, DAILY_SHEET_NAME);
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
       range: `${quoteSheetName(dailySheetInfo.title)}!A2:F`,
     });
     const rows = normalizeDailyRows(response.data.values || []);
-    const summary = await buildItinerarySummaryData(sheets, rows);
+    const summary = await buildItinerarySummaryData(sheets, rows, monthKey);
 
     res.json({ summary });
   } catch (error) {
@@ -1618,6 +1621,36 @@ app.get("/", (req, res) => {
       font-size: 18px;
     }
 
+    .filter-row {
+      display: flex;
+      align-items: end;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .filter-row label {
+      min-width: 150px;
+      gap: 5px;
+    }
+
+    .filter-row input,
+    .filter-row select {
+      min-height: 38px;
+      background: #ffffff;
+    }
+
+    .clear-filter-button {
+      min-height: 38px;
+      background: #ffffff;
+      color: var(--accent-dark);
+      border: 1px solid var(--line);
+      padding: 0 12px;
+    }
+
+    .clear-filter-button:hover {
+      background: #eef7f6;
+    }
+
     .table-actions {
       display: flex;
       gap: 10px;
@@ -1786,6 +1819,15 @@ app.get("/", (req, res) => {
       .table-toolbar {
         align-items: stretch;
         flex-direction: column;
+      }
+
+      .filter-row {
+        align-items: stretch;
+        flex-direction: column;
+      }
+
+      .filter-row label {
+        min-width: 0;
       }
 
       .topbar {
@@ -1983,6 +2025,19 @@ app.get("/", (req, res) => {
     <section id="dailyTabPanel" class="panel table-panel tab-panel" role="tabpanel">
       <div class="table-toolbar">
         <h2>Daily Sheet</h2>
+        <div class="filter-row">
+          <label>
+            Filter Date
+            <input id="dailyDateFilter" type="date">
+          </label>
+          <label>
+            Filter Store
+            <select id="dailyStoreFilter">
+              <option value="">All stores</option>
+            </select>
+          </label>
+          <button id="clearDailyFiltersButton" class="clear-filter-button" type="button">Clear</button>
+        </div>
         <div class="status" id="tableStatus" role="status" aria-live="polite"></div>
       </div>
       <div class="table-wrap">
@@ -2007,6 +2062,12 @@ app.get("/", (req, res) => {
     <section id="summaryTabPanel" class="panel table-panel tab-panel" role="tabpanel" hidden>
       <div class="table-toolbar">
         <h2>Itinerary Summary</h2>
+        <div class="filter-row">
+          <label>
+            Review Month
+            <input id="summaryMonthFilter" type="month">
+          </label>
+        </div>
         <div class="status" id="summaryStatus" role="status" aria-live="polite"></div>
       </div>
       <div class="summary-grid">
@@ -2059,6 +2120,10 @@ app.get("/", (req, res) => {
     const summaryTabButton = document.getElementById("summaryTabButton");
     const dailyTabPanel = document.getElementById("dailyTabPanel");
     const summaryTabPanel = document.getElementById("summaryTabPanel");
+    const dailyDateFilter = document.getElementById("dailyDateFilter");
+    const dailyStoreFilter = document.getElementById("dailyStoreFilter");
+    const clearDailyFiltersButton = document.getElementById("clearDailyFiltersButton");
+    const summaryMonthFilter = document.getElementById("summaryMonthFilter");
     let currentEntry = null;
     let dailyRows = [];
     let storeOptions = [];
@@ -2127,20 +2192,35 @@ app.get("/", (req, res) => {
       storeInput.disabled = hasOpenEntry;
     }
 
+    function matchesDailyFilters(row) {
+      const dateFilter = dailyDateFilter.value;
+      const storeFilter = dailyStoreFilter.value;
+
+      if (dateFilter && row.date !== dateFilter) return false;
+      if (storeFilter && row.store !== storeFilter) return false;
+
+      return true;
+    }
+
     function renderDailyTable() {
-      const rows = currentEntry ? dailyRows.concat([currentEntry]) : dailyRows;
+      const baseRows = dailyRows
+        .map((row, index) => ({ row, index }))
+        .filter(({ row }) => matchesDailyFilters(row));
+      const rows = currentEntry && matchesDailyFilters(currentEntry)
+        ? baseRows.concat([{ row: currentEntry, index: -1 }])
+        : baseRows;
 
       if (!rows.length) {
-        dailyTableBody.innerHTML = '<tr><td colspan="6">No rows yet.</td></tr>';
+        dailyTableBody.innerHTML = '<tr><td colspan="6">No rows match the current filters.</td></tr>';
         return;
       }
 
       dailyTableBody.innerHTML = "";
 
-      rows.forEach((row, rowIndex) => {
+      rows.forEach(({ row, index }) => {
         const isPending = Boolean(currentEntry && row === currentEntry);
         const tr = document.createElement("tr");
-        const editableIndex = isPending ? -1 : rowIndex;
+        const editableIndex = isPending ? -1 : index;
         const dateCell = document.createElement("td");
         const dateControl = document.createElement("input");
         dateControl.className = "table-input";
@@ -2291,7 +2371,10 @@ app.get("/", (req, res) => {
 
     async function loadSummary() {
       try {
-        const response = await fetch("/api/summary");
+        const monthQuery = summaryMonthFilter.value
+          ? "?month=" + encodeURIComponent(summaryMonthFilter.value)
+          : "";
+        const response = await fetch("/api/summary" + monthQuery);
         const data = await response.json();
 
         if (!response.ok) throw new Error(data.message || "Unable to load Itinerary Summary.");
@@ -2369,12 +2452,18 @@ app.get("/", (req, res) => {
         }
 
         storeOptions = data.stores;
+        dailyStoreFilter.innerHTML = '<option value="">All stores</option>';
 
         for (const store of data.stores) {
           const option = document.createElement("option");
           option.value = store;
           option.textContent = store;
           storeInput.appendChild(option);
+
+          const filterOption = document.createElement("option");
+          filterOption.value = store;
+          filterOption.textContent = store;
+          dailyStoreFilter.appendChild(filterOption);
         }
 
         renderDailyTable();
@@ -2507,8 +2596,17 @@ app.get("/", (req, res) => {
 
     dailyTabButton.addEventListener("click", () => setActiveTab("daily"));
     summaryTabButton.addEventListener("click", () => setActiveTab("summary"));
+    dailyDateFilter.addEventListener("change", renderDailyTable);
+    dailyStoreFilter.addEventListener("change", renderDailyTable);
+    clearDailyFiltersButton.addEventListener("click", () => {
+      dailyDateFilter.value = "";
+      dailyStoreFilter.value = "";
+      renderDailyTable();
+    });
+    summaryMonthFilter.addEventListener("change", loadSummary);
 
     setAutomaticDate();
+    summaryMonthFilter.value = localDateValue().slice(0, 7);
     setPunchState(false);
     loadStores();
     loadDailyRows().then(refreshItinerarySummary);
