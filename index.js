@@ -6,6 +6,7 @@ const PORT = process.env.PORT || 3000;
 const SPREADSHEET_ID =
   process.env.SPREADSHEET_ID || "13hgFrJPHbzrfXb2-tMHJ5lZbtQhSVvyJwRwYaTi9aII";
 const DAILY_SHEET_NAME = process.env.DAILY_SHEET_NAME || "Daily Sheet";
+const ITINERARY_SHEET_NAME = process.env.ITINERARY_SHEET_NAME || "Itinerary";
 const STORE_SHEET_NAME = process.env.STORE_SHEET_NAME || "Store";
 
 app.use(express.json());
@@ -201,6 +202,20 @@ function calculateDuration(timeIn, timeOut) {
   return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
 }
 
+function formatItineraryDate(inputDate) {
+  const [year, month, day] = String(inputDate || "").split("-").map(Number);
+
+  if (!year || !month || !day) {
+    return inputDate;
+  }
+
+  return new Intl.DateTimeFormat("en-US", {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  }).format(new Date(year, month - 1, day));
+}
+
 async function readStores() {
   try {
     return await readStoresWithSheetsApi();
@@ -310,8 +325,123 @@ async function appendVisit({ date, store, timeIn, timeOut, note }) {
   });
 
   await applyDailySheetFormatting(sheets, sheetInfo.sheetId);
+  await updateItinerarySheet(sheets, date, store);
 
   return { date, store, timeIn, timeOut, duration, note: note || "" };
+}
+
+async function updateItinerarySheet(sheets, date, store) {
+  const sheetInfo = await resolveSheetInfo(sheets, ITINERARY_SHEET_NAME);
+  const itineraryDate = formatItineraryDate(date);
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${quoteSheetName(sheetInfo.title)}!A:I`,
+  });
+  const rows = response.data.values || [];
+  const targetRowIndex = rows.findIndex(
+    (row, index) => index > 0 && String(row[0] || "").trim() === itineraryDate
+  );
+
+  if (targetRowIndex === -1) {
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${quoteSheetName(sheetInfo.title)}!A1:I1`,
+      valueInputOption: "USER_ENTERED",
+      insertDataOption: "INSERT_ROWS",
+      requestBody: {
+        values: [[itineraryDate, store]],
+      },
+    });
+    await applyItinerarySheetFormatting(sheets, sheetInfo.sheetId);
+    return;
+  }
+
+  const row = rows[targetRowIndex] || [];
+  const existingStores = row.slice(1, 9).map((value) => String(value || "").trim());
+
+  if (existingStores.includes(store)) {
+    await applyItinerarySheetFormatting(sheets, sheetInfo.sheetId);
+    return;
+  }
+
+  const emptyStoreIndex = existingStores.findIndex((value) => !value);
+
+  if (emptyStoreIndex === -1) {
+    const error = new Error(
+      `Itinerary already has 8 stores for ${itineraryDate}.`
+    );
+    error.status = 400;
+    throw error;
+  }
+
+  const rowNumber = targetRowIndex + 1;
+  const columnLetter = String.fromCharCode("B".charCodeAt(0) + emptyStoreIndex);
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${quoteSheetName(sheetInfo.title)}!${columnLetter}${rowNumber}`,
+    valueInputOption: "USER_ENTERED",
+    requestBody: {
+      values: [[store]],
+    },
+  });
+
+  await applyItinerarySheetFormatting(sheets, sheetInfo.sheetId);
+}
+
+async function applyItinerarySheetFormatting(sheets, sheetId) {
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: SPREADSHEET_ID,
+    requestBody: {
+      requests: [
+        {
+          repeatCell: {
+            range: {
+              sheetId,
+              startRowIndex: 0,
+              endRowIndex: 1,
+              startColumnIndex: 0,
+              endColumnIndex: 9,
+            },
+            cell: {
+              userEnteredFormat: {
+                backgroundColor: { red: 0.22, green: 0.43, blue: 0.14 },
+                horizontalAlignment: "CENTER",
+                textFormat: {
+                  foregroundColor: { red: 1, green: 1, blue: 1 },
+                  bold: true,
+                },
+              },
+            },
+            fields:
+              "userEnteredFormat(backgroundColor,horizontalAlignment,textFormat)",
+          },
+        },
+        {
+          repeatCell: {
+            range: {
+              sheetId,
+              startRowIndex: 1,
+              startColumnIndex: 0,
+              endColumnIndex: 9,
+            },
+            cell: {
+              userEnteredFormat: {
+                backgroundColor: { red: 1, green: 1, blue: 1 },
+                horizontalAlignment: "LEFT",
+                textFormat: {
+                  foregroundColor: { red: 0, green: 0, blue: 0 },
+                  bold: false,
+                },
+              },
+            },
+            fields:
+              "userEnteredFormat(backgroundColor,horizontalAlignment,textFormat)",
+          },
+        },
+      ],
+    },
+  });
 }
 
 async function applyDailySheetFormatting(sheets, sheetId) {
