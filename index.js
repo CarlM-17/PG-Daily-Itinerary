@@ -1343,17 +1343,22 @@ app.get("/", (req, res) => {
   <style>
     :root {
       color-scheme: light;
-      --ink: #1b2633;
-      --muted: #5d6b7a;
-      --line: #d8dee6;
-      --field: #f7f9fc;
-      --page: #edf1f6;
+      --ink: #132018;
+      --muted: #667085;
+      --line: #d7ded8;
+      --field: #f8faf8;
+      --page: #eef3ef;
       --panel: #ffffff;
-      --accent: #0f766e;
-      --accent-dark: #0b5f59;
-      --danger: #b42318;
+      --accent: #145c2a;
+      --accent-dark: #0b3f1b;
+      --accent-soft: #e8f3ec;
+      --accent-line: #b9d7c3;
+      --danger: #a33a32;
+      --danger-soft: #fde8e6;
       --success: #067647;
-      --shadow: 0 20px 50px rgba(31, 43, 59, 0.12);
+      --warning: #946200;
+      --shadow: 0 16px 38px rgba(19, 32, 24, 0.10);
+      --shadow-soft: 0 8px 22px rgba(19, 32, 24, 0.08);
     }
 
     * {
@@ -1365,56 +1370,81 @@ app.get("/", (req, res) => {
       min-height: 100vh;
       font-family: Arial, Helvetica, sans-serif;
       background:
-        linear-gradient(135deg, rgba(15, 118, 110, 0.10), transparent 34%),
-        linear-gradient(315deg, rgba(217, 119, 6, 0.12), transparent 36%),
+        linear-gradient(180deg, rgba(11, 63, 27, 0.10), transparent 300px),
+        linear-gradient(135deg, rgba(20, 92, 42, 0.10), transparent 34%),
         var(--page);
       color: var(--ink);
     }
 
     main {
-      width: min(960px, calc(100% - 32px));
+      width: min(1200px, calc(100% - 32px));
       margin: 0 auto;
-      padding: 36px 0;
+      padding: 28px 0 40px;
     }
 
     .topbar {
       display: flex;
       justify-content: space-between;
-      align-items: flex-end;
+      align-items: center;
       gap: 16px;
-      margin-bottom: 18px;
+      margin-bottom: 20px;
     }
 
     h1 {
       margin: 0;
-      font-size: clamp(28px, 4vw, 42px);
+      font-size: clamp(30px, 4vw, 46px);
       line-height: 1.08;
       letter-spacing: 0;
     }
 
+    .eyebrow {
+      margin: 0 0 6px;
+      color: var(--accent-dark);
+      font-size: 12px;
+      font-weight: 900;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .subtitle {
+      margin: 8px 0 0;
+      color: var(--muted);
+      font-size: 15px;
+      font-weight: 700;
+    }
+
     .sheet-link {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 42px;
+      padding: 0 14px;
+      border: 1px solid var(--accent-line);
+      border-radius: 999px;
+      background: #ffffff;
       color: var(--accent-dark);
       font-weight: 700;
       text-decoration: none;
       white-space: nowrap;
+      box-shadow: var(--shadow-soft);
     }
 
     .shell {
       display: grid;
-      grid-template-columns: 1.4fr 0.8fr;
+      grid-template-columns: minmax(0, 1.65fr) minmax(280px, 0.75fr);
       gap: 18px;
       align-items: start;
     }
 
     .panel {
       background: var(--panel);
-      border: 1px solid rgba(216, 222, 230, 0.85);
-      border-radius: 8px;
+      border: 1px solid rgba(215, 222, 216, 0.95);
+      border-radius: 14px;
       box-shadow: var(--shadow);
     }
 
     form {
-      padding: 22px;
+      padding: 24px;
     }
 
     .grid {
@@ -1428,16 +1458,21 @@ app.get("/", (req, res) => {
       gap: 7px;
       color: var(--muted);
       font-size: 13px;
-      font-weight: 700;
+      font-weight: 800;
+    }
+
+    .required-mark {
+      color: var(--danger);
+      font-weight: 900;
     }
 
     input,
     select,
     textarea {
       width: 100%;
-      min-height: 44px;
+      min-height: 46px;
       border: 1px solid var(--line);
-      border-radius: 7px;
+      border-radius: 10px;
       background: var(--field);
       color: var(--ink);
       font: inherit;
@@ -1450,7 +1485,8 @@ app.get("/", (req, res) => {
     select:focus,
     textarea:focus {
       border-color: var(--accent);
-      box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.15);
+      background: #ffffff;
+      box-shadow: 0 0 0 4px rgba(20, 92, 42, 0.14);
     }
 
     textarea {
@@ -1470,9 +1506,9 @@ app.get("/", (req, res) => {
       min-height: 44px;
       padding: 10px 12px;
       border: 1px solid var(--line);
-      border-radius: 7px;
-      background: #fff8eb;
-      color: #7a4f01;
+      border-radius: 10px;
+      background: #fff8e6;
+      color: var(--warning);
       font-weight: 800;
     }
 
@@ -1487,17 +1523,21 @@ app.get("/", (req, res) => {
     button {
       min-height: 44px;
       border: 0;
-      border-radius: 7px;
+      border-radius: 10px;
       background: var(--accent);
       color: white;
       font: inherit;
       font-weight: 800;
       padding: 0 18px;
       cursor: pointer;
+      box-shadow: 0 8px 18px rgba(20, 92, 42, 0.18);
+      transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
     }
 
     button:hover {
       background: var(--accent-dark);
+      box-shadow: 0 10px 22px rgba(20, 92, 42, 0.24);
+      transform: translateY(-1px);
     }
 
     button:disabled {
@@ -1512,11 +1552,14 @@ app.get("/", (req, res) => {
     }
 
     .capture-button.secondary {
-      background: #315f8c;
+      background: #f3f6f4;
+      color: var(--accent-dark);
+      border: 1px solid var(--accent-line);
+      box-shadow: none;
     }
 
     .capture-button.secondary:hover {
-      background: #25496c;
+      background: #e6eee8;
     }
 
     .compact-actions {
@@ -1524,26 +1567,31 @@ app.get("/", (req, res) => {
     }
 
     .status {
-      min-height: 20px;
-      font-size: 14px;
+      min-height: 24px;
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 13px;
+      font-weight: 800;
       color: var(--muted);
     }
 
     .status.error {
+      background: var(--danger-soft);
       color: var(--danger);
     }
 
     .status.success {
+      background: #dcfae6;
       color: var(--success);
     }
 
     .summary {
-      padding: 20px;
+      padding: 22px;
     }
 
     .summary h2 {
       margin: 0 0 14px;
-      font-size: 18px;
+      font-size: 20px;
       letter-spacing: 0;
     }
 
@@ -1567,7 +1615,7 @@ app.get("/", (req, res) => {
 
     dt {
       color: var(--muted);
-      font-size: 12px;
+      font-size: 11px;
       font-weight: 800;
       text-transform: uppercase;
     }
@@ -1587,14 +1635,20 @@ app.get("/", (req, res) => {
       display: flex;
       gap: 8px;
       margin-top: 18px;
+      padding: 6px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.76);
+      box-shadow: var(--shadow-soft);
     }
 
     .tab-button {
       width: auto;
       min-height: 42px;
-      background: #ffffff;
+      background: transparent;
       color: var(--accent-dark);
-      border: 1px solid var(--line);
+      border: 0;
+      box-shadow: none;
     }
 
     .tab-button.active {
@@ -1612,13 +1666,14 @@ app.get("/", (req, res) => {
       justify-content: space-between;
       align-items: center;
       gap: 12px;
-      padding: 14px 16px;
+      padding: 16px 18px;
       border-bottom: 1px solid var(--line);
+      background: #fbfdfb;
     }
 
     .table-toolbar h2 {
       margin: 0;
-      font-size: 18px;
+      font-size: 20px;
     }
 
     .filter-row {
@@ -1641,10 +1696,11 @@ app.get("/", (req, res) => {
 
     .clear-filter-button {
       min-height: 38px;
-      background: #ffffff;
+      background: #f6f7f6;
       color: var(--accent-dark);
       border: 1px solid var(--line);
       padding: 0 12px;
+      box-shadow: none;
     }
 
     .clear-filter-button:hover {
@@ -1665,7 +1721,8 @@ app.get("/", (req, res) => {
     table {
       width: 100%;
       min-width: 760px;
-      border-collapse: collapse;
+      border-collapse: separate;
+      border-spacing: 0;
       color: #000000;
       font-size: 14px;
     }
@@ -1675,18 +1732,29 @@ app.get("/", (req, res) => {
       color: #ffffff;
       font-weight: 800;
       text-align: left;
-      border: 1px solid #d9d9d9;
-      padding: 4px 6px;
+      border-bottom: 1px solid #0f4618;
+      padding: 9px 10px;
+      position: sticky;
+      top: 0;
+      z-index: 4;
     }
 
     td {
       min-width: 110px;
-      height: 26px;
+      height: 38px;
       background: #ffffff;
       color: #000000;
-      border: 1px solid #d9d9d9;
-      padding: 3px 6px;
+      border-bottom: 1px solid #e5e8e5;
+      padding: 6px 10px;
       outline: none;
+    }
+
+    tbody tr:nth-child(even) td {
+      background: #f8fbf8;
+    }
+
+    tbody tr:hover td {
+      background: #eef7f0;
     }
 
     td:focus {
@@ -1699,7 +1767,7 @@ app.get("/", (req, res) => {
       min-height: 24px;
       border: 0;
       border-radius: 0;
-      background: #ffffff;
+      background: transparent;
       color: #000000;
       font: inherit;
       padding: 0;
@@ -1721,15 +1789,17 @@ app.get("/", (req, res) => {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 12px;
-      padding: 16px;
+      padding: 18px;
       border-bottom: 1px solid var(--line);
+      background: #fbfdfb;
     }
 
     .metric {
       border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 12px;
+      border-radius: 12px;
+      padding: 14px;
       background: #ffffff;
+      box-shadow: var(--shadow-soft);
     }
 
     .metric span {
@@ -1743,7 +1813,7 @@ app.get("/", (req, res) => {
     .metric strong {
       display: block;
       margin-top: 4px;
-      font-size: 28px;
+      font-size: 30px;
       line-height: 1;
     }
 
@@ -1757,7 +1827,7 @@ app.get("/", (req, res) => {
       height: 34px;
       overflow: hidden;
       border: 1px solid var(--line);
-      border-radius: 8px;
+      border-radius: 999px;
       background: #f8d7da;
     }
 
@@ -1841,7 +1911,8 @@ app.get("/", (req, res) => {
       }
 
       .sheet-link,
-      button {
+      button,
+      .tab-button {
         width: 100%;
         text-align: center;
       }
@@ -1870,6 +1941,16 @@ app.get("/", (req, res) => {
       .summary h2,
       .table-toolbar h2 {
         font-size: 17px;
+      }
+
+      .tabs {
+        flex-direction: column;
+        margin-top: 12px;
+      }
+
+      .summary-grid {
+        grid-template-columns: 1fr;
+        padding: 12px;
       }
 
       .table-panel {
@@ -1903,7 +1984,7 @@ app.get("/", (req, res) => {
       }
 
       td:first-child {
-        background: #ffffff;
+        background: inherit;
       }
 
       th:first-child {
@@ -1960,7 +2041,11 @@ app.get("/", (req, res) => {
 <body>
   <main>
     <div class="topbar">
-      <h1>PG Daily Itinerary Store Visits</h1>
+      <div>
+        <p class="eyebrow">Retail Operations</p>
+        <h1>PG Daily Itinerary Store Visits</h1>
+        <p class="subtitle">Track store coverage, visit times, and monthly itinerary completion.</p>
+      </div>
       <a class="sheet-link" href="https://docs.google.com/spreadsheets/d/${escapeHtml(SPREADSHEET_ID)}/edit?gid=0#gid=0" target="_blank" rel="noreferrer">Open Google Sheet</a>
     </div>
 
@@ -1968,24 +2053,24 @@ app.get("/", (req, res) => {
       <form class="panel" id="visitForm">
         <div class="grid">
           <label>
-            Date
+            Date <span class="required-mark">*</span>
             <input id="date" name="date" type="date" value="${today}" required>
           </label>
 
           <label>
-            Store
+            Store <span class="required-mark">*</span>
             <select id="store" name="store" required>
               <option value="">Loading stores...</option>
             </select>
           </label>
 
           <label>
-            Time In
+            Time In <span class="required-mark">*</span>
             <button id="timeInButton" class="capture-button" type="button">Time In</button>
           </label>
 
           <label>
-            Time Out
+            Time Out <span class="required-mark">*</span>
             <button id="timeOutButton" class="capture-button secondary" type="button" disabled>Time Out</button>
           </label>
 
