@@ -446,6 +446,144 @@ async function appendVisit({ date, store, timeIn, timeOut, note }) {
   return { date, store, timeIn, timeOut, duration, note: note || "" };
 }
 
+function getUpdatedRowNumber(updatedRange) {
+  const match = String(updatedRange || "").match(/![A-Z]+(\d+):/);
+  return match ? Number(match[1]) : null;
+}
+
+async function getOpenVisit(sheets = getSheetsClient()) {
+  const sheetInfo = await resolveSheetInfo(sheets, DAILY_SHEET_NAME);
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${quoteSheetName(sheetInfo.title)}!A2:F`,
+  });
+  const rows = response.data.values || [];
+
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index] || [];
+    const visit = {
+      rowNumber: index + 2,
+      date: String(row[0] || "").trim(),
+      store: String(row[1] || "").trim(),
+      timeIn: String(row[2] || "").trim(),
+      timeOut: String(row[3] || "").trim(),
+      duration: String(row[4] || "").trim(),
+      note: String(row[5] || "").trim(),
+    };
+
+    if (visit.date && visit.store && visit.timeIn && !visit.timeOut) {
+      return visit;
+    }
+  }
+
+  return null;
+}
+
+async function startOpenVisit({ date, store, timeIn, note }) {
+  const sheets = getSheetsClient();
+  const existingOpenVisit = await getOpenVisit(sheets);
+
+  if (existingOpenVisit) {
+    return { visit: existingOpenVisit, alreadyOpen: true };
+  }
+
+  const sheetInfo = await resolveSheetInfo(sheets, DAILY_SHEET_NAME);
+
+  if (!date || !store || !timeIn) {
+    const error = new Error("Date, Store, and Time In are required.");
+    error.status = 400;
+    throw error;
+  }
+
+  const response = await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${quoteSheetName(sheetInfo.title)}!A1:F1`,
+    valueInputOption: "USER_ENTERED",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: {
+      values: [[date, store, timeIn, "", "", note || ""]],
+    },
+  });
+  const rowNumber = getUpdatedRowNumber(response.data.updates && response.data.updates.updatedRange);
+  const visit = {
+    rowNumber,
+    date,
+    store,
+    timeIn,
+    timeOut: "",
+    duration: "",
+    note: note || "",
+  };
+
+  await applyDailySheetFormatting(sheets, sheetInfo.sheetId);
+
+  return { visit, alreadyOpen: false };
+}
+
+async function endOpenVisit({ rowNumber, timeOut, note }) {
+  const sheets = getSheetsClient();
+  const sheetInfo = await resolveSheetInfo(sheets, DAILY_SHEET_NAME);
+  const openVisit = rowNumber
+    ? await readVisitAtRow(sheets, sheetInfo.title, Number(rowNumber))
+    : await getOpenVisit(sheets);
+
+  if (!openVisit || !openVisit.timeIn || openVisit.timeOut) {
+    const error = new Error("No open Time In session was found.");
+    error.status = 400;
+    throw error;
+  }
+
+  if (!timeOut) {
+    const error = new Error("Time Out is required.");
+    error.status = 400;
+    throw error;
+  }
+
+  const duration = calculateDuration(openVisit.timeIn, timeOut);
+  const finalNote = note ?? openVisit.note ?? "";
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${quoteSheetName(sheetInfo.title)}!D${openVisit.rowNumber}:F${openVisit.rowNumber}`,
+    valueInputOption: "USER_ENTERED",
+    requestBody: {
+      values: [[timeOut, duration, finalNote]],
+    },
+  });
+
+  await applyDailySheetFormatting(sheets, sheetInfo.sheetId);
+  await updateItinerarySheet(sheets, openVisit.date, openVisit.store);
+  await updateTimeSheet(sheets, openVisit.date);
+  await rebuildItinerarySummaryFromSheets(sheets);
+
+  return {
+    ...openVisit,
+    timeOut,
+    duration,
+    note: finalNote,
+  };
+}
+
+async function readVisitAtRow(sheets, sheetName, rowNumber) {
+  if (!rowNumber || rowNumber < 2) return null;
+
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${quoteSheetName(sheetName)}!A${rowNumber}:F${rowNumber}`,
+  });
+  const row = (response.data.values || [])[0] || [];
+
+  return {
+    rowNumber,
+    date: String(row[0] || "").trim(),
+    store: String(row[1] || "").trim(),
+    timeIn: String(row[2] || "").trim(),
+    timeOut: String(row[3] || "").trim(),
+    duration: String(row[4] || "").trim(),
+    note: String(row[5] || "").trim(),
+  };
+}
+
 function normalizeDailyRows(rows) {
   return rows
     .map((row) => [
@@ -467,14 +605,19 @@ async function readDailyRows() {
     range: `${quoteSheetName(sheetInfo.title)}!A2:F`,
   });
 
-  return normalizeDailyRows(response.data.values || []).map((row) => ({
-    date: row[0],
-    store: row[1],
-    timeIn: row[2],
-    timeOut: row[3],
-    duration: row[4],
-    note: row[5],
-  }));
+  return (response.data.values || [])
+    .map((row, index) => ({
+      rowNumber: index + 2,
+      date: String(row[0] || "").trim(),
+      store: String(row[1] || "").trim(),
+      timeIn: String(row[2] || "").trim(),
+      timeOut: String(row[3] || "").trim(),
+      duration: String(row[4] || "").trim(),
+      note: String(row[5] || "").trim(),
+    }))
+    .filter((row) =>
+      row.date || row.store || row.timeIn || row.timeOut || row.duration || row.note
+    );
 }
 
 async function replaceDailyRows(rows) {
@@ -508,7 +651,8 @@ async function replaceDailyRows(rows) {
   await applyDailySheetFormatting(sheets, dailySheetInfo.sheetId);
   await rebuildDerivedSheetsFromDailyRows(sheets, normalizedRows);
 
-  return normalizedRows.map((row) => ({
+  return normalizedRows.map((row, index) => ({
+    rowNumber: index + 2,
     date: row[0],
     store: row[1],
     timeIn: row[2],
@@ -1247,6 +1391,45 @@ app.put("/api/daily", async (req, res) => {
   try {
     const rows = await replaceDailyRows(Array.isArray(req.body.rows) ? req.body.rows : []);
     res.json({ rows });
+  } catch (error) {
+    const message = formatApiError(error);
+    res.status(error.status || 500).json({ message });
+  }
+});
+
+app.get("/api/visits/active", async (req, res) => {
+  try {
+    const visit = await getOpenVisit();
+    res.json({ visit });
+  } catch (error) {
+    const message = formatApiError(error);
+    res.status(error.status || 500).json({ message });
+  }
+});
+
+app.post("/api/visits/start", async (req, res) => {
+  try {
+    const result = await startOpenVisit({
+      date: String(req.body.date || "").trim(),
+      store: String(req.body.store || "").trim(),
+      timeIn: String(req.body.timeIn || "").trim(),
+      note: String(req.body.note || "").trim(),
+    });
+    res.status(result.alreadyOpen ? 200 : 201).json(result);
+  } catch (error) {
+    const message = formatApiError(error);
+    res.status(error.status || 500).json({ message });
+  }
+});
+
+app.post("/api/visits/end", async (req, res) => {
+  try {
+    const visit = await endOpenVisit({
+      rowNumber: req.body.rowNumber,
+      timeOut: String(req.body.timeOut || "").trim(),
+      note: String(req.body.note || "").trim(),
+    });
+    res.json({ visit });
   } catch (error) {
     const message = formatApiError(error);
     res.status(error.status || 500).json({ message });
@@ -2291,9 +2474,7 @@ app.get("/", (req, res) => {
       const baseRows = dailyRows
         .map((row, index) => ({ row, index }))
         .filter(({ row }) => matchesDailyFilters(row));
-      const rows = currentEntry && matchesDailyFilters(currentEntry)
-        ? baseRows.concat([{ row: currentEntry, index: -1 }])
-        : baseRows;
+      const rows = baseRows;
 
       if (!rows.length) {
         dailyTableBody.innerHTML = '<tr><td colspan="6">No rows match the current filters.</td></tr>';
@@ -2303,7 +2484,11 @@ app.get("/", (req, res) => {
       dailyTableBody.innerHTML = "";
 
       rows.forEach(({ row, index }) => {
-        const isPending = Boolean(currentEntry && row === currentEntry);
+        const isPending = Boolean(
+          currentEntry &&
+          Number(row.rowNumber) === Number(currentEntry.rowNumber) &&
+          !row.timeOut
+        );
         const tr = document.createElement("tr");
         const editableIndex = isPending ? -1 : index;
         const dateCell = document.createElement("td");
@@ -2433,6 +2618,34 @@ app.get("/", (req, res) => {
         renderDailyTable();
       } catch (error) {
         dailyTableBody.innerHTML = '<tr><td colspan="6">' + error.message + '</td></tr>';
+      }
+    }
+
+    async function restoreActiveVisit() {
+      try {
+        const response = await fetch("/api/visits/active");
+        const data = await response.json();
+
+        if (!response.ok) throw new Error(data.message || "Unable to check active visit.");
+
+        currentEntry = data.visit || null;
+
+        if (currentEntry) {
+          dateInput.value = currentEntry.date || localDateValue();
+          noteInput.value = currentEntry.note || "";
+          if (currentEntry.store) {
+            storeInput.value = currentEntry.store;
+          }
+          setPunchState(true);
+          setStatus("Active Time In restored. Press Time Out when this store visit is complete.", "success");
+        } else {
+          setPunchState(false);
+        }
+
+        renderDailyTable();
+        refreshPreview();
+      } catch (error) {
+        setStatus(error.message, "error");
       }
     }
 
@@ -2571,25 +2784,47 @@ app.get("/", (req, res) => {
       event.preventDefault();
     });
 
-    timeInButton.addEventListener("click", () => {
+    timeInButton.addEventListener("click", async () => {
       if (!dateInput.value || !storeInput.value) {
         setStatus("Select a date and store before Time In.", "error");
         return;
       }
 
-      currentEntry = {
-        date: dateInput.value,
-        store: storeInput.value,
-        timeIn: localTimeValue(),
-        timeOut: "",
-        duration: "",
-        note: noteInput.value.trim()
-      };
+      const startedAt = localTimeValue();
 
-      setPunchState(true);
-      setStatus("Time In captured. Press Time Out when visit is complete.", "success");
-      renderDailyTable();
-      refreshPreview();
+      timeInButton.disabled = true;
+      setStatus("Saving Time In...");
+
+      try {
+        const response = await fetch("/api/visits/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            date: dateInput.value,
+            store: storeInput.value,
+            timeIn: startedAt,
+            note: noteInput.value.trim()
+          })
+        });
+        const data = await response.json();
+
+        if (!response.ok) throw new Error(data.message || "Unable to save Time In.");
+
+        currentEntry = data.visit;
+        setPunchState(true);
+        setStatus(
+          data.alreadyOpen
+            ? "Active Time In restored. Press Time Out when this store visit is complete."
+            : "Time In saved. Press Time Out when this store visit is complete.",
+          "success"
+        );
+        await loadDailyRows();
+        renderDailyTable();
+        refreshPreview();
+      } catch (error) {
+        setStatus(error.message, "error");
+        setPunchState(false);
+      }
     });
 
     timeOutButton.addEventListener("click", async () => {
@@ -2604,13 +2839,11 @@ app.get("/", (req, res) => {
       refreshPreview();
 
       try {
-        const response = await fetch("/api/visits", {
+        const response = await fetch("/api/visits/end", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            date: currentEntry.date,
-            store: currentEntry.store,
-            timeIn: currentEntry.timeIn,
+            rowNumber: currentEntry.rowNumber,
             timeOut: currentEntry.timeOut,
             note: currentEntry.note
           })
@@ -2619,7 +2852,7 @@ app.get("/", (req, res) => {
         const data = await response.json();
         if (!response.ok) throw new Error(data.message || "Unable to save visit.");
 
-        setStatus("Saved to Daily Sheet.", "success");
+        setStatus("Time Out saved. Visit complete.", "success");
         currentEntry = null;
         setPunchState(false);
         setAutomaticDate();
@@ -2693,8 +2926,9 @@ app.get("/", (req, res) => {
     setAutomaticDate();
     summaryMonthFilter.value = localDateValue().slice(0, 7);
     setPunchState(false);
-    loadStores();
-    loadDailyRows().then(refreshItinerarySummary);
+    Promise.all([loadStores(), loadDailyRows()])
+      .then(restoreActiveVisit)
+      .then(refreshItinerarySummary);
     loadSummary();
     refreshPreview();
   </script>
