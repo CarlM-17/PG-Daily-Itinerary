@@ -13,6 +13,8 @@ const STORE_LIST_SHEET_NAME = process.env.STORE_LIST_SHEET_NAME || "StoreList";
 const ITINERARY_SUMMARY_SHEET_NAME =
   process.env.ITINERARY_SUMMARY_SHEET_NAME || "Itinerary Summary";
 const DAILY_BACKUP_SHEET_NAME = process.env.DAILY_BACKUP_SHEET_NAME || "Daily Backup";
+const BACKUP_MIN_INTERVAL_MS = 10 * 60 * 1000;
+let lastDailyBackupAt = 0;
 
 app.use(express.json());
 
@@ -441,7 +443,6 @@ async function appendVisit({ date, store, timeIn, timeOut, note }) {
     },
   });
 
-  await applyDailySheetFormatting(sheets, sheetInfo.sheetId);
   await updateItinerarySheet(sheets, date, store);
   await updateTimeSheet(sheets, date);
   await rebuildItinerarySummaryFromSheets(sheets);
@@ -520,8 +521,6 @@ async function startOpenVisit({ date, store, timeIn, note }) {
     note: note || "",
   };
 
-  await applyDailySheetFormatting(sheets, sheetInfo.sheetId);
-
   return { visit, alreadyOpen: false };
 }
 
@@ -558,7 +557,6 @@ async function endOpenVisit({ rowNumber, timeOut, note }) {
     },
   });
 
-  await applyDailySheetFormatting(sheets, sheetInfo.sheetId);
   await updateItinerarySheet(sheets, openVisit.date, openVisit.store);
   await updateTimeSheet(sheets, openVisit.date);
   await rebuildItinerarySummaryFromSheets(sheets);
@@ -609,8 +607,6 @@ async function updateVisitNote({ rowNumber, note }) {
     error.status = 404;
     throw error;
   }
-
-  await backupDailySheet(sheets);
 
   await sheets.spreadsheets.values.update({
     spreadsheetId: SPREADSHEET_ID,
@@ -663,12 +659,9 @@ async function updateDailyRow({ rowNumber, row }) {
     },
   });
 
-  await applyDailySheetFormatting(sheets, sheetInfo.sheetId);
-
   if (values[0] && values[1] && values[2] && values[3]) {
     await updateItinerarySheet(sheets, values[0], values[1]);
     await updateTimeSheet(sheets, values[0]);
-    await rebuildItinerarySummaryFromSheets(sheets);
   }
 
   return {
@@ -683,6 +676,12 @@ async function updateDailyRow({ rowNumber, row }) {
 }
 
 async function backupDailySheet(sheets) {
+  const now = Date.now();
+
+  if (now - lastDailyBackupAt < BACKUP_MIN_INTERVAL_MS) {
+    return;
+  }
+
   const dailySheetInfo = await resolveSheetInfo(sheets, DAILY_SHEET_NAME);
   const backupSheetInfo = await ensureSheetInfo(sheets, DAILY_BACKUP_SHEET_NAME);
   const response = await sheets.spreadsheets.values.get({
@@ -705,8 +704,7 @@ async function backupDailySheet(sheets) {
     valueInputOption: "USER_ENTERED",
     requestBody: { values },
   });
-
-  await applyDailySheetFormatting(sheets, backupSheetInfo.sheetId);
+  lastDailyBackupAt = now;
 }
 
 function normalizeDailyRows(rows) {
@@ -2750,7 +2748,7 @@ app.get("/", (req, res) => {
     function queueTableAutoSave(rowIndex) {
       clearTimeout(tableSaveTimer);
       setTableStatus("Auto-saving...");
-      tableSaveTimer = setTimeout(() => saveTableChanges(rowIndex), 700);
+      tableSaveTimer = setTimeout(() => saveTableChanges(rowIndex), 2000);
     }
 
     function queueOpenNoteSave() {
@@ -2758,7 +2756,7 @@ app.get("/", (req, res) => {
 
       clearTimeout(noteSaveTimer);
       setStatus("Saving note...");
-      noteSaveTimer = setTimeout(saveOpenVisitNote, 600);
+      noteSaveTimer = setTimeout(saveOpenVisitNote, 2000);
     }
 
     async function saveOpenVisitNote() {
@@ -2807,8 +2805,6 @@ app.get("/", (req, res) => {
 
         dailyRows[rowIndex] = data.row;
         setTableStatus("Auto-saved.", "success");
-        renderDailyTable();
-        await loadSummary();
       } catch (error) {
         setTableStatus(error.message, "error");
       }
@@ -3074,7 +3070,6 @@ app.get("/", (req, res) => {
         setAutomaticDate();
         noteInput.value = "";
         await loadDailyRows();
-        await loadSummary();
         refreshPreview();
       } catch (error) {
         setStatus(error.message, "error");
@@ -3159,9 +3154,7 @@ app.get("/", (req, res) => {
     summaryMonthFilter.value = localDateValue().slice(0, 7);
     setPunchState(false);
     Promise.all([loadStores(), loadDailyRows()])
-      .then(restoreActiveVisit)
-      .then(refreshItinerarySummary);
-    loadSummary();
+      .then(restoreActiveVisit);
     refreshPreview();
   </script>
 </body>
