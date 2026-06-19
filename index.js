@@ -283,6 +283,24 @@ function minutesToDuration(startMinutes, endMinutes) {
   return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
 }
 
+function durationToMinutes(value) {
+  const match = String(value || "").trim().match(/^(\d+):(\d{2})$/);
+
+  if (!match) return null;
+
+  return Number(match[1]) * 60 + Number(match[2]);
+}
+
+function minutesToDurationText(totalMinutes) {
+  const safeMinutes = Math.max(Number(totalMinutes) || 0, 0);
+  const hours = Math.floor(safeMinutes / 60);
+  const minutes = safeMinutes % 60;
+
+  if (hours && minutes) return `${hours}h ${minutes}m`;
+  if (hours) return `${hours}h`;
+  return `${minutes}m`;
+}
+
 function formatItineraryDate(inputDate) {
   const [year, month, day] = String(inputDate || "").split("-").map(Number);
 
@@ -741,6 +759,61 @@ async function readDailyRows() {
     .filter((row) =>
       row.date || row.store || row.timeIn || row.timeOut || row.duration || row.note
     );
+}
+
+async function readTimeSheetSummary({ startDate, endDate }) {
+  const sheets = getSheetsClient();
+  const sheetInfo = await resolveSheetInfo(sheets, TIMESHEET_SHEET_NAME);
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${quoteSheetName(sheetInfo.title)}!A2:E`,
+  });
+  const rows = response.data.values || [];
+  const requiredMinutes = 9 * 60;
+  const records = rows
+    .map((row) => {
+      const date = String(row[0] || "").trim();
+      const timeIn = String(row[2] || row[1] || "").trim();
+      const timeOut = String(row[3] || row[2] || "").trim();
+      const duration = String(row[4] || row[3] || "").trim();
+      const durationMinutes = durationToMinutes(duration);
+      const lackingMinutes =
+        durationMinutes === null ? 0 : Math.max(requiredMinutes - durationMinutes, 0);
+      const normalizedDate = normalizeDateKey(date);
+
+      return {
+        date,
+        normalizedDate,
+        timeIn,
+        timeOut,
+        duration,
+        durationMinutes,
+        lackingMinutes,
+        remarks: lackingMinutes
+          ? `Undertime - lacking ${minutesToDurationText(lackingMinutes)}`
+          : "Complete",
+      };
+    })
+    .filter((record) => record.date)
+    .filter((record) => {
+      if (startDate && record.normalizedDate < startDate) return false;
+      if (endDate && record.normalizedDate > endDate) return false;
+      return true;
+    });
+  const undertimeRecords = records.filter((record) => record.lackingMinutes > 0);
+  const totalLackingMinutes = undertimeRecords.reduce(
+    (total, record) => total + record.lackingMinutes,
+    0
+  );
+
+  return {
+    records,
+    totalDates: records.length,
+    undertimeDates: undertimeRecords.length,
+    completeDates: records.length - undertimeRecords.length,
+    totalLackingMinutes,
+    totalLackingText: minutesToDurationText(totalLackingMinutes),
+  };
 }
 
 async function replaceDailyRows(rows) {
@@ -1621,6 +1694,26 @@ app.get("/api/summary", async (req, res) => {
   }
 });
 
+app.get("/api/timesheet", async (req, res) => {
+  try {
+    const startDate = String(req.query.start || "").trim();
+    const endDate = String(req.query.end || "").trim();
+    const isDate = (value) => !value || /^\d{4}-\d{2}-\d{2}$/.test(value);
+
+    if (!isDate(startDate) || !isDate(endDate)) {
+      const error = new Error("Use YYYY-MM-DD format for Time Sheet date filters.");
+      error.status = 400;
+      throw error;
+    }
+
+    const data = await readTimeSheetSummary({ startDate, endDate });
+    res.json(data);
+  } catch (error) {
+    const message = formatApiError(error);
+    res.status(error.status || 500).json({ message });
+  }
+});
+
 app.post("/api/visits", async (req, res) => {
   try {
     const saved = await appendVisit({
@@ -2179,6 +2272,11 @@ app.get("/", (req, res) => {
       background: #176122;
     }
 
+    .chart-undertime {
+      width: var(--undertime-width, 0%);
+      background: #a33a32;
+    }
+
     .chart-legend {
       display: flex;
       flex-wrap: wrap;
@@ -2213,6 +2311,11 @@ app.get("/", (req, res) => {
     }
 
     .status-pill.visited {
+      background: #d1fadf;
+      color: #05603a;
+    }
+
+    .status-pill.complete {
       background: #d1fadf;
       color: #05603a;
     }
@@ -2448,6 +2551,7 @@ app.get("/", (req, res) => {
     <div class="tabs" role="tablist" aria-label="Workbook views">
       <button id="dailyTabButton" class="tab-button active" type="button" role="tab" aria-selected="true" aria-controls="dailyTabPanel">Daily Sheet</button>
       <button id="summaryTabButton" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="summaryTabPanel">Itinerary Summary</button>
+      <button id="timeSheetTabButton" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="timeSheetTabPanel">Time Sheet</button>
     </div>
 
     <section id="dailyTabPanel" class="panel table-panel tab-panel" role="tabpanel">
@@ -2529,6 +2633,55 @@ app.get("/", (req, res) => {
         </table>
       </div>
     </section>
+
+    <section id="timeSheetTabPanel" class="panel table-panel tab-panel" role="tabpanel" hidden>
+      <div class="table-toolbar">
+        <h2>Time Sheet</h2>
+        <div class="filter-row">
+          <label>
+            Start Date
+            <input id="timeSheetStartFilter" type="date">
+          </label>
+          <label>
+            End Date
+            <input id="timeSheetEndFilter" type="date">
+          </label>
+          <button id="clearTimeSheetFiltersButton" class="clear-filter-button" type="button">Current Month</button>
+        </div>
+        <div class="status" id="timeSheetStatus" role="status" aria-live="polite"></div>
+      </div>
+      <div class="summary-grid">
+        <div class="metric"><span>Total Dates</span><strong id="timeSheetTotalDates">0</strong></div>
+        <div class="metric"><span>Undertime Dates</span><strong id="timeSheetUndertimeDates">0</strong></div>
+        <div class="metric"><span>Total Lacking</span><strong id="timeSheetTotalLacking">0m</strong></div>
+      </div>
+      <div class="chart-box">
+        <div id="timeSheetChartBar" class="chart-bar" style="--undertime-width: 0%">
+          <div class="chart-undertime"></div>
+          <div></div>
+        </div>
+        <div class="chart-legend">
+          <span><span class="legend-dot missing"></span>Undertime</span>
+          <span><span class="legend-dot"></span>Complete</span>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table aria-label="Time Sheet table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Time In</th>
+              <th>Time Out</th>
+              <th>Duration</th>
+              <th>Remarks</th>
+            </tr>
+          </thead>
+          <tbody id="timeSheetTableBody">
+            <tr><td colspan="5">Loading Time Sheet...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
   </main>
 
   <script>
@@ -2544,14 +2697,21 @@ app.get("/", (req, res) => {
     const summaryStatusOutput = document.getElementById("summaryStatus");
     const dailyTableBody = document.getElementById("dailyTableBody");
     const summaryTableBody = document.getElementById("summaryTableBody");
+    const timeSheetTableBody = document.getElementById("timeSheetTableBody");
     const dailyTabButton = document.getElementById("dailyTabButton");
     const summaryTabButton = document.getElementById("summaryTabButton");
+    const timeSheetTabButton = document.getElementById("timeSheetTabButton");
     const dailyTabPanel = document.getElementById("dailyTabPanel");
     const summaryTabPanel = document.getElementById("summaryTabPanel");
+    const timeSheetTabPanel = document.getElementById("timeSheetTabPanel");
     const dailyDateFilter = document.getElementById("dailyDateFilter");
     const dailyStoreFilter = document.getElementById("dailyStoreFilter");
     const clearDailyFiltersButton = document.getElementById("clearDailyFiltersButton");
     const summaryMonthFilter = document.getElementById("summaryMonthFilter");
+    const timeSheetStartFilter = document.getElementById("timeSheetStartFilter");
+    const timeSheetEndFilter = document.getElementById("timeSheetEndFilter");
+    const clearTimeSheetFiltersButton = document.getElementById("clearTimeSheetFiltersButton");
+    const timeSheetStatusOutput = document.getElementById("timeSheetStatus");
     let currentEntry = null;
     let dailyRows = [];
     let storeOptions = [];
@@ -2566,6 +2726,20 @@ app.get("/", (req, res) => {
 
     function currentMonthValue() {
       return localDateValue().slice(0, 7);
+    }
+
+    function currentMonthStartValue() {
+      return currentMonthValue() + "-01";
+    }
+
+    function currentMonthEndValue() {
+      const [year, month] = currentMonthValue().split("-").map(Number);
+      const end = new Date(year, month, 0);
+      return [
+        end.getFullYear(),
+        String(end.getMonth() + 1).padStart(2, "0"),
+        String(end.getDate()).padStart(2, "0")
+      ].join("-");
     }
 
     function localTimeValue() {
@@ -2590,6 +2764,11 @@ app.get("/", (req, res) => {
     function setSummaryStatus(message, type = "") {
       summaryStatusOutput.textContent = message;
       summaryStatusOutput.className = "status" + (type ? " " + type : "");
+    }
+
+    function setTimeSheetStatus(message, type = "") {
+      timeSheetStatusOutput.textContent = message;
+      timeSheetStatusOutput.className = "status" + (type ? " " + type : "");
     }
 
     function durationBetween(timeIn, timeOut) {
@@ -2924,6 +3103,54 @@ app.get("/", (req, res) => {
       }
     }
 
+    async function loadTimeSheet() {
+      try {
+        setTimeSheetStatus("Loading...");
+        const params = new URLSearchParams();
+        if (timeSheetStartFilter.value) params.set("start", timeSheetStartFilter.value);
+        if (timeSheetEndFilter.value) params.set("end", timeSheetEndFilter.value);
+        const query = params.toString() ? "?" + params.toString() : "";
+        const response = await fetch("/api/timesheet" + query);
+        const data = await response.json();
+
+        if (!response.ok) throw new Error(data.message || "Unable to load Time Sheet.");
+
+        renderTimeSheet(data);
+        setTimeSheetStatus("Updated.", "success");
+      } catch (error) {
+        setTimeSheetStatus(error.message, "error");
+        timeSheetTableBody.innerHTML = '<tr><td colspan="5">' + escapeForHtml(error.message) + '</td></tr>';
+      }
+    }
+
+    function renderTimeSheet(data) {
+      const totalDates = data.totalDates || 0;
+      const undertimeDates = data.undertimeDates || 0;
+      const undertimeWidth = totalDates ? Math.round((undertimeDates / totalDates) * 100) : 0;
+      document.getElementById("timeSheetTotalDates").textContent = String(totalDates);
+      document.getElementById("timeSheetUndertimeDates").textContent = String(undertimeDates);
+      document.getElementById("timeSheetTotalLacking").textContent = data.totalLackingText || "0m";
+      document.getElementById("timeSheetChartBar").style.setProperty("--undertime-width", undertimeWidth + "%");
+      timeSheetTableBody.innerHTML = "";
+
+      if (!data.records || !data.records.length) {
+        timeSheetTableBody.innerHTML = '<tr><td colspan="5">No Time Sheet rows found for the selected period.</td></tr>';
+        return;
+      }
+
+      for (const record of data.records) {
+        const tr = document.createElement("tr");
+        const isComplete = record.lackingMinutes === 0;
+        tr.innerHTML =
+          "<td>" + escapeForHtml(record.date) + "</td>" +
+          "<td>" + escapeForHtml(record.timeIn || "-") + "</td>" +
+          "<td>" + escapeForHtml(record.timeOut || "-") + "</td>" +
+          "<td>" + escapeForHtml(record.duration || "-") + "</td>" +
+          '<td><span class="status-pill ' + (isComplete ? "complete" : "") + '">' + escapeForHtml(record.remarks) + "</span></td>";
+        timeSheetTableBody.appendChild(tr);
+      }
+    }
+
     function escapeForHtml(value) {
       return String(value ?? "")
         .replaceAll("&", "&amp;")
@@ -2935,15 +3162,24 @@ app.get("/", (req, res) => {
 
     function setActiveTab(tabName) {
       const showSummary = tabName === "summary";
-      dailyTabButton.classList.toggle("active", !showSummary);
+      const showTimeSheet = tabName === "timesheet";
+      const showDaily = !showSummary && !showTimeSheet;
+      dailyTabButton.classList.toggle("active", showDaily);
       summaryTabButton.classList.toggle("active", showSummary);
-      dailyTabButton.setAttribute("aria-selected", String(!showSummary));
+      timeSheetTabButton.classList.toggle("active", showTimeSheet);
+      dailyTabButton.setAttribute("aria-selected", String(showDaily));
       summaryTabButton.setAttribute("aria-selected", String(showSummary));
-      dailyTabPanel.hidden = showSummary;
+      timeSheetTabButton.setAttribute("aria-selected", String(showTimeSheet));
+      dailyTabPanel.hidden = !showDaily;
       summaryTabPanel.hidden = !showSummary;
+      timeSheetTabPanel.hidden = !showTimeSheet;
 
       if (showSummary) {
         loadSummary();
+      }
+
+      if (showTimeSheet) {
+        loadTimeSheet();
       }
     }
 
@@ -3150,6 +3386,7 @@ app.get("/", (req, res) => {
 
     dailyTabButton.addEventListener("click", () => setActiveTab("daily"));
     summaryTabButton.addEventListener("click", () => setActiveTab("summary"));
+    timeSheetTabButton.addEventListener("click", () => setActiveTab("timesheet"));
     dailyDateFilter.addEventListener("change", renderDailyTable);
     dailyStoreFilter.addEventListener("change", renderDailyTable);
     clearDailyFiltersButton.addEventListener("click", () => {
@@ -3158,9 +3395,18 @@ app.get("/", (req, res) => {
       renderDailyTable();
     });
     summaryMonthFilter.addEventListener("change", loadSummary);
+    timeSheetStartFilter.addEventListener("change", loadTimeSheet);
+    timeSheetEndFilter.addEventListener("change", loadTimeSheet);
+    clearTimeSheetFiltersButton.addEventListener("click", () => {
+      timeSheetStartFilter.value = currentMonthStartValue();
+      timeSheetEndFilter.value = currentMonthEndValue();
+      loadTimeSheet();
+    });
 
     setAutomaticDate();
     summaryMonthFilter.value = currentMonthValue();
+    timeSheetStartFilter.value = currentMonthStartValue();
+    timeSheetEndFilter.value = currentMonthEndValue();
     setPunchState(false);
     Promise.all([loadStores(), loadDailyRows()])
       .then(restoreActiveVisit);
