@@ -2564,6 +2564,10 @@ app.get("/", (req, res) => {
       return new Date(now.getTime() - offset * 60000).toISOString().slice(0, 10);
     }
 
+    function currentMonthValue() {
+      return localDateValue().slice(0, 7);
+    }
+
     function localTimeValue() {
       const now = new Date();
       return String(now.getHours()).padStart(2, "0") + ":" + String(now.getMinutes()).padStart(2, "0");
@@ -2624,9 +2628,11 @@ app.get("/", (req, res) => {
     function matchesDailyFilters(row) {
       const dateFilter = dailyDateFilter.value;
       const storeFilter = dailyStoreFilter.value;
+      const hasSearchFilter = Boolean(dateFilter || storeFilter);
 
       if (dateFilter && row.date !== dateFilter) return false;
       if (storeFilter && row.store !== storeFilter) return false;
+      if (!hasSearchFilter && String(row.date || "").slice(0, 7) !== currentMonthValue()) return false;
 
       return true;
     }
@@ -2638,7 +2644,10 @@ app.get("/", (req, res) => {
       const rows = baseRows;
 
       if (!rows.length) {
-        dailyTableBody.innerHTML = '<tr><td colspan="6">No rows match the current filters.</td></tr>';
+        const message = dailyDateFilter.value || dailyStoreFilter.value
+          ? "No rows match the current filters."
+          : "No Daily Sheet rows found for the current month.";
+        dailyTableBody.innerHTML = '<tr><td colspan="6">' + message + '</td></tr>';
         return;
       }
 
@@ -3151,7 +3160,7 @@ app.get("/", (req, res) => {
     summaryMonthFilter.addEventListener("change", loadSummary);
 
     setAutomaticDate();
-    summaryMonthFilter.value = localDateValue().slice(0, 7);
+    summaryMonthFilter.value = currentMonthValue();
     setPunchState(false);
     Promise.all([loadStores(), loadDailyRows()])
       .then(restoreActiveVisit);
