@@ -584,6 +584,37 @@ async function readVisitAtRow(sheets, sheetName, rowNumber) {
   };
 }
 
+async function updateVisitNote({ rowNumber, note }) {
+  const sheets = getSheetsClient();
+  const sheetInfo = await resolveSheetInfo(sheets, DAILY_SHEET_NAME);
+  const targetRowNumber = Number(rowNumber);
+
+  if (!targetRowNumber || targetRowNumber < 2) {
+    const error = new Error("A valid Daily Sheet row is required to update the note.");
+    error.status = 400;
+    throw error;
+  }
+
+  const visit = await readVisitAtRow(sheets, sheetInfo.title, targetRowNumber);
+
+  if (!visit || !visit.date || !visit.store || !visit.timeIn) {
+    const error = new Error("The selected Daily Sheet row was not found.");
+    error.status = 404;
+    throw error;
+  }
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${quoteSheetName(sheetInfo.title)}!F${targetRowNumber}`,
+    valueInputOption: "USER_ENTERED",
+    requestBody: {
+      values: [[note || ""]],
+    },
+  });
+
+  return { ...visit, note: note || "" };
+}
+
 function normalizeDailyRows(rows) {
   return rows
     .map((row) => [
@@ -1427,6 +1458,19 @@ app.post("/api/visits/end", async (req, res) => {
     const visit = await endOpenVisit({
       rowNumber: req.body.rowNumber,
       timeOut: String(req.body.timeOut || "").trim(),
+      note: String(req.body.note || "").trim(),
+    });
+    res.json({ visit });
+  } catch (error) {
+    const message = formatApiError(error);
+    res.status(error.status || 500).json({ message });
+  }
+});
+
+app.patch("/api/visits/note", async (req, res) => {
+  try {
+    const visit = await updateVisitNote({
+      rowNumber: req.body.rowNumber,
       note: String(req.body.note || "").trim(),
     });
     res.json({ visit });
@@ -2396,6 +2440,7 @@ app.get("/", (req, res) => {
     let dailyRows = [];
     let storeOptions = [];
     let tableSaveTimer = null;
+    let noteSaveTimer = null;
 
     function localDateValue() {
       const now = new Date();
@@ -2490,7 +2535,7 @@ app.get("/", (req, res) => {
           !row.timeOut
         );
         const tr = document.createElement("tr");
-        const editableIndex = isPending ? -1 : index;
+        const editableIndex = isPending ? index : index;
         const dateCell = document.createElement("td");
         const dateControl = document.createElement("input");
         dateControl.className = "table-input";
@@ -2537,9 +2582,12 @@ app.get("/", (req, res) => {
         noteControl.className = "table-input";
         noteControl.type = "text";
         noteControl.value = row.note || "";
-        noteControl.disabled = isPending;
+        noteControl.disabled = false;
         noteControl.dataset.rowIndex = editableIndex;
         noteControl.dataset.field = "note";
+        if (isPending) {
+          noteControl.dataset.pendingNote = "true";
+        }
         noteCell.appendChild(noteControl);
         tr.appendChild(noteCell);
 
@@ -2585,6 +2633,37 @@ app.get("/", (req, res) => {
       clearTimeout(tableSaveTimer);
       setTableStatus("Auto-saving...");
       tableSaveTimer = setTimeout(saveTableChanges, 700);
+    }
+
+    function queueOpenNoteSave() {
+      if (!currentEntry || !currentEntry.rowNumber) return;
+
+      clearTimeout(noteSaveTimer);
+      setStatus("Saving note...");
+      noteSaveTimer = setTimeout(saveOpenVisitNote, 600);
+    }
+
+    async function saveOpenVisitNote() {
+      if (!currentEntry || !currentEntry.rowNumber) return;
+
+      try {
+        const response = await fetch("/api/visits/note", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            rowNumber: currentEntry.rowNumber,
+            note: currentEntry.note || ""
+          })
+        });
+        const data = await response.json();
+
+        if (!response.ok) throw new Error(data.message || "Unable to save note.");
+
+        currentEntry.note = data.visit.note || "";
+        setStatus("Note saved.", "success");
+      } catch (error) {
+        setStatus(error.message, "error");
+      }
     }
 
     async function saveTableChanges() {
@@ -2774,6 +2853,15 @@ app.get("/", (req, res) => {
     noteInput.addEventListener("input", () => {
       if (currentEntry) {
         currentEntry.note = noteInput.value;
+        const rowIndex = dailyRows.findIndex(
+          (row) => Number(row.rowNumber) === Number(currentEntry.rowNumber)
+        );
+
+        if (rowIndex !== -1) {
+          dailyRows[rowIndex].note = currentEntry.note;
+        }
+
+        queueOpenNoteSave();
         renderDailyTable();
       }
 
@@ -2879,6 +2967,14 @@ app.get("/", (req, res) => {
 
       dailyRows[rowIndex][field] = control.value;
 
+      if (control.dataset.pendingNote === "true" && field === "note") {
+        currentEntry.note = control.value;
+        noteInput.value = control.value;
+        queueOpenNoteSave();
+        refreshPreview();
+        return;
+      }
+
       if (field === "timeIn" || field === "timeOut") {
         dailyRows[rowIndex].duration = durationBetween(
           dailyRows[rowIndex].timeIn,
@@ -2900,6 +2996,14 @@ app.get("/", (req, res) => {
       if (rowIndex < 0 || !dailyRows[rowIndex] || !field) return;
 
       dailyRows[rowIndex][field] = control.value;
+
+      if (control.dataset.pendingNote === "true" && field === "note") {
+        currentEntry.note = control.value;
+        noteInput.value = control.value;
+        queueOpenNoteSave();
+        refreshPreview();
+        return;
+      }
 
       if (field === "timeIn" || field === "timeOut") {
         dailyRows[rowIndex].duration = durationBetween(
