@@ -12,6 +12,7 @@ const STORE_SHEET_NAME = process.env.STORE_SHEET_NAME || "Store";
 const STORE_LIST_SHEET_NAME = process.env.STORE_LIST_SHEET_NAME || "StoreList";
 const ITINERARY_SUMMARY_SHEET_NAME =
   process.env.ITINERARY_SUMMARY_SHEET_NAME || "Itinerary Summary";
+const DAILY_BACKUP_SHEET_NAME = process.env.DAILY_BACKUP_SHEET_NAME || "Daily Backup";
 
 app.use(express.json());
 
@@ -428,6 +429,8 @@ async function appendVisit({ date, store, timeIn, timeOut, note }) {
     throw error;
   }
 
+  await backupDailySheet(sheets);
+
   await sheets.spreadsheets.values.append({
     spreadsheetId: SPREADSHEET_ID,
     range: `${quoteSheetName(sheetInfo.title)}!A1:F1`,
@@ -495,6 +498,8 @@ async function startOpenVisit({ date, store, timeIn, note }) {
     throw error;
   }
 
+  await backupDailySheet(sheets);
+
   const response = await sheets.spreadsheets.values.append({
     spreadsheetId: SPREADSHEET_ID,
     range: `${quoteSheetName(sheetInfo.title)}!A1:F1`,
@@ -541,6 +546,8 @@ async function endOpenVisit({ rowNumber, timeOut, note }) {
 
   const duration = calculateDuration(openVisit.timeIn, timeOut);
   const finalNote = note ?? openVisit.note ?? "";
+
+  await backupDailySheet(sheets);
 
   await sheets.spreadsheets.values.update({
     spreadsheetId: SPREADSHEET_ID,
@@ -603,6 +610,8 @@ async function updateVisitNote({ rowNumber, note }) {
     throw error;
   }
 
+  await backupDailySheet(sheets);
+
   await sheets.spreadsheets.values.update({
     spreadsheetId: SPREADSHEET_ID,
     range: `${quoteSheetName(sheetInfo.title)}!F${targetRowNumber}`,
@@ -613,6 +622,91 @@ async function updateVisitNote({ rowNumber, note }) {
   });
 
   return { ...visit, note: note || "" };
+}
+
+async function updateDailyRow({ rowNumber, row }) {
+  const sheets = getSheetsClient();
+  const sheetInfo = await resolveSheetInfo(sheets, DAILY_SHEET_NAME);
+  const targetRowNumber = Number(rowNumber);
+
+  if (!targetRowNumber || targetRowNumber < 2) {
+    const error = new Error("A valid Daily Sheet row is required.");
+    error.status = 400;
+    throw error;
+  }
+
+  const normalized = normalizeDailyRows([row])[0];
+
+  if (!normalized || !normalized.some(Boolean)) {
+    const error = new Error("Refusing to save an empty Daily Sheet row.");
+    error.status = 400;
+    throw error;
+  }
+
+  const values = [
+    normalized[0],
+    normalized[1],
+    normalized[2],
+    normalized[3],
+    calculateDuration(normalized[2], normalized[3]) || normalized[4],
+    normalized[5],
+  ];
+
+  await backupDailySheet(sheets);
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${quoteSheetName(sheetInfo.title)}!A${targetRowNumber}:F${targetRowNumber}`,
+    valueInputOption: "USER_ENTERED",
+    requestBody: {
+      values: [values],
+    },
+  });
+
+  await applyDailySheetFormatting(sheets, sheetInfo.sheetId);
+
+  if (values[0] && values[1] && values[2] && values[3]) {
+    await updateItinerarySheet(sheets, values[0], values[1]);
+    await updateTimeSheet(sheets, values[0]);
+    await rebuildItinerarySummaryFromSheets(sheets);
+  }
+
+  return {
+    rowNumber: targetRowNumber,
+    date: values[0],
+    store: values[1],
+    timeIn: values[2],
+    timeOut: values[3],
+    duration: values[4],
+    note: values[5],
+  };
+}
+
+async function backupDailySheet(sheets) {
+  const dailySheetInfo = await resolveSheetInfo(sheets, DAILY_SHEET_NAME);
+  const backupSheetInfo = await ensureSheetInfo(sheets, DAILY_BACKUP_SHEET_NAME);
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${quoteSheetName(dailySheetInfo.title)}!A:F`,
+  });
+  const values = [
+    ["Backup created", new Date().toISOString(), "", "", "", ""],
+    ...(response.data.values || []),
+  ];
+
+  await sheets.spreadsheets.values.clear({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${quoteSheetName(backupSheetInfo.title)}!A:F`,
+  });
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${quoteSheetName(backupSheetInfo.title)}!A1:F${values.length}`,
+    valueInputOption: "USER_ENTERED",
+    requestBody: { values },
+  });
+
+  await applyDailySheetFormatting(sheets, backupSheetInfo.sheetId);
 }
 
 function normalizeDailyRows(rows) {
@@ -663,21 +757,24 @@ async function replaceDailyRows(rows) {
     row[5],
   ]);
 
-  await sheets.spreadsheets.values.clear({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${quoteSheetName(dailySheetInfo.title)}!A2:F`,
-  });
-
-  if (normalizedRows.length) {
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: SPREADSHEET_ID,
-      range: `${quoteSheetName(dailySheetInfo.title)}!A2:F${normalizedRows.length + 1}`,
-      valueInputOption: "USER_ENTERED",
-      requestBody: {
-        values: normalizedRows,
-      },
-    });
+  if (!normalizedRows.length) {
+    const error = new Error(
+      "Refusing to save an empty Daily Sheet. Reload the page and try again."
+    );
+    error.status = 400;
+    throw error;
   }
+
+  await backupDailySheet(sheets);
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${quoteSheetName(dailySheetInfo.title)}!A2:F${normalizedRows.length + 1}`,
+    valueInputOption: "USER_ENTERED",
+    requestBody: {
+      values: normalizedRows,
+    },
+  });
 
   await applyDailySheetFormatting(sheets, dailySheetInfo.sheetId);
   await rebuildDerivedSheetsFromDailyRows(sheets, normalizedRows);
@@ -1428,6 +1525,19 @@ app.put("/api/daily", async (req, res) => {
   }
 });
 
+app.patch("/api/daily/row", async (req, res) => {
+  try {
+    const row = await updateDailyRow({
+      rowNumber: req.body.rowNumber,
+      row: req.body.row || {},
+    });
+    res.json({ row });
+  } catch (error) {
+    const message = formatApiError(error);
+    res.status(error.status || 500).json({ message });
+  }
+});
+
 app.get("/api/visits/active", async (req, res) => {
   try {
     const visit = await getOpenVisit();
@@ -1531,6 +1641,14 @@ app.post("/api/visits", async (req, res) => {
 
 function formatApiError(error) {
   const message = String(error.message || "");
+
+  if (
+    message.toLowerCase().includes("quota") ||
+    message.toLowerCase().includes("rate limit") ||
+    message.includes("429")
+  ) {
+    return "Google Sheets quota exceeded. Wait a minute, then try again. Your Daily Sheet will not be cleared by this app.";
+  }
 
   if (
     message.includes("invalid_grant") ||
@@ -2629,10 +2747,10 @@ app.get("/", (req, res) => {
         .filter((row) => row.date || row.store || row.timeIn || row.timeOut || row.note);
     }
 
-    function queueTableAutoSave() {
+    function queueTableAutoSave(rowIndex) {
       clearTimeout(tableSaveTimer);
       setTableStatus("Auto-saving...");
-      tableSaveTimer = setTimeout(saveTableChanges, 700);
+      tableSaveTimer = setTimeout(() => saveTableChanges(rowIndex), 700);
     }
 
     function queueOpenNoteSave() {
@@ -2666,18 +2784,28 @@ app.get("/", (req, res) => {
       }
     }
 
-    async function saveTableChanges() {
+    async function saveTableChanges(rowIndex) {
+      const row = dailyRows[rowIndex];
+
+      if (!row || !row.rowNumber) {
+        setTableStatus("Unable to auto-save this row. Reload the page and try again.", "error");
+        return;
+      }
+
       try {
-        const response = await fetch("/api/daily", {
-          method: "PUT",
+        const response = await fetch("/api/daily/row", {
+          method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ rows: getEditedTableRows() })
+          body: JSON.stringify({
+            rowNumber: row.rowNumber,
+            row
+          })
         });
         const data = await response.json();
 
         if (!response.ok) throw new Error(data.message || "Unable to save table changes.");
 
-        dailyRows = data.rows || [];
+        dailyRows[rowIndex] = data.row;
         setTableStatus("Auto-saved.", "success");
         renderDailyTable();
         await loadSummary();
@@ -2983,7 +3111,7 @@ app.get("/", (req, res) => {
         renderDailyTable();
       }
 
-      queueTableAutoSave();
+      queueTableAutoSave(rowIndex);
     });
 
     dailyTableBody.addEventListener("change", (event) => {
@@ -3013,7 +3141,7 @@ app.get("/", (req, res) => {
         renderDailyTable();
       }
 
-      queueTableAutoSave();
+      queueTableAutoSave(rowIndex);
     });
 
     dailyTabButton.addEventListener("click", () => setActiveTab("daily"));
