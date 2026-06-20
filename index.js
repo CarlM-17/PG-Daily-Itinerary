@@ -301,6 +301,10 @@ function minutesToDurationText(totalMinutes) {
   return `${minutes}m`;
 }
 
+function normalizeStoreKey(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
 function formatItineraryDate(inputDate) {
   const [year, month, day] = String(inputDate || "").split("-").map(Number);
 
@@ -738,8 +742,7 @@ function normalizeDailyRows(rows) {
     .filter((row) => row.some(Boolean));
 }
 
-async function readDailyRows() {
-  const sheets = getSheetsClient();
+async function readDailyRows(sheets = getSheetsClient()) {
   const sheetInfo = await resolveSheetInfo(sheets, DAILY_SHEET_NAME);
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
@@ -764,10 +767,30 @@ async function readDailyRows() {
 async function readTimeSheetSummary({ startDate, endDate }) {
   const sheets = getSheetsClient();
   const sheetInfo = await resolveSheetInfo(sheets, TIMESHEET_SHEET_NAME);
-  const response = await sheets.spreadsheets.values.get({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${quoteSheetName(sheetInfo.title)}!A2:E`,
-  });
+  const [response, dailyRows, storeListRows] = await Promise.all([
+    sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${quoteSheetName(sheetInfo.title)}!A2:E`,
+    }),
+    readDailyRows(sheets),
+    readStoreListRows(sheets),
+  ]);
+  const requiredStoreKeys = new Set(storeListRows.map(normalizeStoreKey).filter(Boolean));
+  const storesByDate = new Map();
+
+  for (const row of dailyRows) {
+    const normalizedDate = normalizeDateKey(row.date);
+    const store = String(row.store || "").trim();
+
+    if (!normalizedDate || !store) continue;
+
+    if (!storesByDate.has(normalizedDate)) {
+      storesByDate.set(normalizedDate, new Set());
+    }
+
+    storesByDate.get(normalizedDate).add(store);
+  }
+
   const rows = response.data.values || [];
   const requiredMinutes = 9 * 60;
   const records = rows
@@ -777,9 +800,15 @@ async function readTimeSheetSummary({ startDate, endDate }) {
       const timeOut = String(row[3] || row[2] || "").trim();
       const duration = String(row[4] || row[3] || "").trim();
       const durationMinutes = durationToMinutes(duration);
-      const lackingMinutes =
-        durationMinutes === null ? 0 : Math.max(requiredMinutes - durationMinutes, 0);
       const normalizedDate = normalizeDateKey(date);
+      const dailyStores = Array.from(storesByDate.get(normalizedDate) || []);
+      const storesNotInList = requiredStoreKeys.size
+        ? dailyStores.filter((store) => !requiredStoreKeys.has(normalizeStoreKey(store)))
+        : [];
+      const isExcluded = storesNotInList.length > 0;
+      const rawLackingMinutes =
+        durationMinutes === null ? 0 : Math.max(requiredMinutes - durationMinutes, 0);
+      const lackingMinutes = isExcluded ? 0 : rawLackingMinutes;
 
       return {
         date,
@@ -789,7 +818,10 @@ async function readTimeSheetSummary({ startDate, endDate }) {
         duration,
         durationMinutes,
         lackingMinutes,
-        remarks: lackingMinutes
+        isExcluded,
+        remarks: isExcluded
+          ? storesNotInList.join(", ")
+          : lackingMinutes
           ? `Undertime - lacking ${minutesToDurationText(lackingMinutes)}`
           : "Complete",
       };
@@ -2320,6 +2352,11 @@ app.get("/", (req, res) => {
       color: #05603a;
     }
 
+    .status-pill.excluded {
+      background: #eef2f6;
+      color: #344054;
+    }
+
     @media (max-width: 760px) {
       body {
         background: var(--page);
@@ -3141,12 +3178,13 @@ app.get("/", (req, res) => {
       for (const record of data.records) {
         const tr = document.createElement("tr");
         const isComplete = record.lackingMinutes === 0;
+        const remarkClass = record.isExcluded ? "excluded" : isComplete ? "complete" : "";
         tr.innerHTML =
           "<td>" + escapeForHtml(record.date) + "</td>" +
           "<td>" + escapeForHtml(record.timeIn || "-") + "</td>" +
           "<td>" + escapeForHtml(record.timeOut || "-") + "</td>" +
           "<td>" + escapeForHtml(record.duration || "-") + "</td>" +
-          '<td><span class="status-pill ' + (isComplete ? "complete" : "") + '">' + escapeForHtml(record.remarks) + "</span></td>";
+          '<td><span class="status-pill ' + remarkClass + '">' + escapeForHtml(record.remarks) + "</span></td>";
         timeSheetTableBody.appendChild(tr);
       }
     }
